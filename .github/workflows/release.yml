@@ -20,15 +20,7 @@ on:
       - "v*"
   workflow_dispatch:
 
-# Hash core + node source trees for cache-invalidation parity with ci.yml.
-env:
-  RUST_CACHE_KEY_SOURCES: >-
-    ${{ hashFiles(
-      'honker-core/src/**/*.rs',
-      'honker-core/Cargo.toml',
-      'packages/honker-node/src/**/*.rs',
-      'packages/honker-node/Cargo.toml'
-    ) }}
+# Source-tree hashing inlined per-job; see ci.yml.
 
 jobs:
   publish:
@@ -46,7 +38,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-src-${{ env.RUST_CACHE_KEY_SOURCES }}"
+          prefix-key: "v1-src-${{ hashFiles('honker-core/src/**/*.rs', 'honker-core/Cargo.toml', 'packages/honker-node/src/**/*.rs', 'packages/honker-node/Cargo.toml') }}"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

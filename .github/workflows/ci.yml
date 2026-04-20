@@ -10,6 +10,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Hash the honker-core + honker-node source trees into the cache
+# prefix-key so edits to .rs files (not just dep version bumps)
+# invalidate the cache. See honker/.github/workflows/ci.yml for
+# the longer rationale.
+env:
+  RUST_CACHE_KEY_SOURCES: >-
+    ${{ hashFiles(
+      'honker-core/src/**/*.rs',
+      'honker-core/Cargo.toml',
+      'packages/honker-node/src/**/*.rs',
+      'packages/honker-node/Cargo.toml'
+    ) }}
+
 jobs:
   test:
     name: test
@@ -31,6 +44,8 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-src-${{ env.RUST_CACHE_KEY_SOURCES }}"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}

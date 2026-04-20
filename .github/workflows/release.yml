@@ -1,0 +1,53 @@
+name: Release · npm
+
+# Publishes @honker/node to npm via npm Trusted Publishing (OIDC).
+# No NPM_TOKEN required — GitHub's OIDC exchange mints a short-lived
+# token scoped to this repo/workflow.
+#
+# One-time setup at https://www.npmjs.com/package/@honker/node/access:
+#   Trusted Publishers → GitHub Actions
+#     Repository: russellromney/honker-node
+#     Workflow:   release.yml
+#     Environment: (leave blank)
+#
+# Trigger: push a tag matching `v*`.
+#   git tag v0.1.1
+#   git push origin v0.1.1
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # OIDC: required for npm Trusted Publishing.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout parent repo (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: russellromney/honker
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # Trusted publishing requires npm ≥ 11.5 in the runner.
+          # `registry-url` also sets up auth for `npm publish`.
+          registry-url: "https://registry.npmjs.org"
+      - name: Ensure npm >= 11.5.1 (OIDC support)
+        run: npm install --global npm@latest
+      - name: Build .node binary
+        working-directory: packages/honker-node
+        run: |
+          npm install
+          npx napi build --platform --release
+      - name: Publish (OIDC)
+        working-directory: packages/honker-node
+        run: npm publish --provenance --access public

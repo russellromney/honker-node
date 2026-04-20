@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["20", "22"]
+    steps:
+      # honker-node's Cargo.toml path-deps ../../honker-core, which
+      # only exists when checked out as a submodule of the main
+      # honker repo. Clone the parent repo with submodules and build
+      # from the submodule checkout so the relative path resolves.
+      - name: Checkout parent repo (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: russellromney/honker
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Build .node binary
+        working-directory: packages/honker-node
+        run: |
+          npm install
+          npx napi build --platform --release
+      - name: Test
+        working-directory: packages/honker-node
+        run: npm test

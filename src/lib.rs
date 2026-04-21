@@ -396,6 +396,11 @@ impl WalEvents {
 pub fn open(path: String, max_readers: Option<u32>) -> Result<Database> {
     let max_readers = max_readers.unwrap_or(8).max(1) as usize;
     let writer_conn = open_conn(&path, true).map_err(napi_err)?;
+    // Register every honker_* SQL scalar on the writer connection so
+    // Node callers get the full queue / scheduler / stream surface
+    // via db.transaction().query("SELECT honker_enqueue(...)").
+    // Matches the Python binding's open() — parity across languages.
+    honker_core::attach_honker_functions(&writer_conn).map_err(napi_err)?;
     let wal_path: PathBuf = format!("{}-wal", path).into();
     Ok(Database {
         writer: Arc::new(Writer::new(writer_conn)),

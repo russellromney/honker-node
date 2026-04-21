@@ -1,6 +1,6 @@
 {
   "name": "@russellthehippo/honker-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Node binding for honker — durable queues, streams, pub/sub, and scheduler on SQLite.",
   "main": "index.js",
   "types": "index.d.ts",

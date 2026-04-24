@@ -113,8 +113,8 @@ fn sql_params_from_json(arr: Option<Vec<JsonValue>>) -> Vec<SqlValue> {
 pub struct Database {
     writer: Arc<Writer>,
     readers: Arc<Readers>,
-    wal_path: PathBuf,
-    /// Lazy-initialized shared WAL watcher — one stat-poll thread per
+    db_path: PathBuf,
+    /// Lazy-initialized shared WAL watcher — one PRAGMA-poll thread per
     /// Database regardless of how many `walEvents()` subscribers. See
     /// honker-core::SharedWalWatcher.
     shared_watcher: Arc<Mutex<Option<Arc<SharedWalWatcher>>>>,
@@ -174,7 +174,7 @@ impl Database {
             if let Some(existing) = guard.as_ref() {
                 existing.clone()
             } else {
-                let w = Arc::new(SharedWalWatcher::new(self.wal_path.clone()));
+                let w = Arc::new(SharedWalWatcher::new(self.db_path.clone()));
                 *guard = Some(w.clone());
                 w
             }
@@ -401,11 +401,10 @@ pub fn open(path: String, max_readers: Option<u32>) -> Result<Database> {
     // via db.transaction().query("SELECT honker_enqueue(...)").
     // Matches the Python binding's open() — parity across languages.
     honker_core::attach_honker_functions(&writer_conn).map_err(napi_err)?;
-    let wal_path: PathBuf = format!("{}-wal", path).into();
     Ok(Database {
         writer: Arc::new(Writer::new(writer_conn)),
-        readers: Arc::new(Readers::new(path, max_readers)),
-        wal_path,
+        readers: Arc::new(Readers::new(path.clone(), max_readers)),
+        db_path: path.into(),
         shared_watcher: Arc::new(Mutex::new(None)),
     })
 }

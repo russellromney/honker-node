@@ -1,6 +1,6 @@
 // Ephemeral pub/sub — pg_notify semantics on SQLite.
 //
-// A subscriber sleeps on walEvents().next() and wakes on every DB
+// A subscriber sleeps on updateEvents().next() and wakes on every DB
 // commit (same process or across processes on the same file), then
 // reads new rows from _honker_notifications by id.
 //
@@ -16,7 +16,7 @@ const db = lit.open(path.join(dir, 'app.db'));
 
 async function run() {
   const received = [];
-  const ev = db.walEvents();
+  const ev = db.updateEvents();
 
   // Snapshot the current high-water mark so we only see NEW
   // notifications.
@@ -39,7 +39,7 @@ async function run() {
     }
   })();
 
-  // Give the listener a tick to park on walEvents.
+  // Give the listener a tick to park on updateEvents.
   await new Promise((r) => setTimeout(r, 50));
 
   for (const id of [1, 2, 3]) {

@@ -9,7 +9,7 @@
 //!     tx.notify('orders', JSON.stringify({id: 42}));
 //!     tx.commit();
 //!
-//!     const ev = db.walEvents();
+//!     const ev = db.updateEvents();
 //!     while (running) {
 //!       await ev.next();
 //!       const rows = db.query(
@@ -23,11 +23,11 @@
 //! JS and SQLite. Users can pass numbers, strings, booleans, null,
 //! arrays, and objects; objects/arrays get JSON-stringified.
 //!
-//! Writer pool, reader pool, connection open, notify() attach, and WAL
-//! file watcher all come from the shared `honker-core` rlib so the
+//! Writer pool, reader pool, connection open, notify() attach, and the
+//! update watcher all come from the shared `honker-core` rlib so the
 //! PyO3, SQLite-extension, and Node bindings can't drift apart.
 
-use honker_core::{Readers, SharedWalWatcher, Writer, open_conn};
+use honker_core::{Readers, SharedUpdateWatcher, Writer, open_conn};
 use napi::Result;
 use napi_derive::napi;
 use parking_lot::Mutex;
@@ -114,10 +114,10 @@ pub struct Database {
     writer: Arc<Writer>,
     readers: Arc<Readers>,
     db_path: PathBuf,
-    /// Lazy-initialized shared WAL watcher — one PRAGMA-poll thread per
-    /// Database regardless of how many `walEvents()` subscribers. See
-    /// honker-core::SharedWalWatcher.
-    shared_watcher: Arc<Mutex<Option<Arc<SharedWalWatcher>>>>,
+    /// Lazy-initialized shared update watcher — one PRAGMA-poll thread per
+    /// Database regardless of how many `updateEvents()` subscribers. See
+    /// honker-core::SharedUpdateWatcher.
+    shared_watcher: Arc<Mutex<Option<Arc<SharedUpdateWatcher>>>>,
 }
 
 #[napi]
@@ -150,11 +150,7 @@ impl Database {
 
     /// SELECT returns `Array<Object>` (each row is a plain object).
     #[napi(ts_return_type = "Array<Record<string, any>>")]
-    pub fn query(
-        &self,
-        sql: String,
-        params: Option<Vec<JsonValue>>,
-    ) -> Result<JsonValue> {
+    pub fn query(&self, sql: String, params: Option<Vec<JsonValue>>) -> Result<JsonValue> {
         let params = sql_params_from_json(params);
         let conn = self.readers.acquire().map_err(napi_err)?;
         let result = run_query(&conn, &sql, &params);
@@ -162,25 +158,25 @@ impl Database {
         result
     }
 
-    /// Filesystem watcher on the .db-wal file. `await ev.next()` resolves
+    /// Update watcher for this database. `await ev.next()` resolves
     /// on every commit to the database (any process, any writer).
     ///
     /// N subscribers share a single background poll thread via the
-    /// core SharedWalWatcher.
+    /// core SharedUpdateWatcher.
     #[napi]
-    pub fn wal_events(&self) -> Result<WalEvents> {
+    pub fn update_events(&self) -> Result<UpdateEvents> {
         let shared = {
             let mut guard = self.shared_watcher.lock();
             if let Some(existing) = guard.as_ref() {
                 existing.clone()
             } else {
-                let w = Arc::new(SharedWalWatcher::new(self.db_path.clone()));
+                let w = Arc::new(SharedUpdateWatcher::new(self.db_path.clone()));
                 *guard = Some(w.clone());
                 w
             }
         };
         let (sub_id, rx) = shared.subscribe();
-        Ok(WalEvents {
+        Ok(UpdateEvents {
             shared,
             sub_id,
             rx: Arc::new(Mutex::new(rx)),
@@ -258,11 +254,7 @@ pub struct Transaction {
 #[napi]
 impl Transaction {
     #[napi]
-    pub fn execute(
-        &self,
-        sql: String,
-        params: Option<Vec<JsonValue>>,
-    ) -> Result<u32> {
+    pub fn execute(&self, sql: String, params: Option<Vec<JsonValue>>) -> Result<u32> {
         let params = sql_params_from_json(params);
         let state = self.inner.lock();
         let conn = state
@@ -273,11 +265,7 @@ impl Transaction {
     }
 
     #[napi(ts_return_type = "Array<Record<string, any>>")]
-    pub fn query(
-        &self,
-        sql: String,
-        params: Option<Vec<JsonValue>>,
-    ) -> Result<JsonValue> {
+    pub fn query(&self, sql: String, params: Option<Vec<JsonValue>>) -> Result<JsonValue> {
         let params = sql_params_from_json(params);
         let state = self.inner.lock();
         let conn = state
@@ -352,25 +340,25 @@ impl Transaction {
 }
 
 #[napi]
-pub struct WalEvents {
+pub struct UpdateEvents {
     /// Keep the shared watcher alive as long as this subscription
-    /// exists. `Drop` on WalEvents unsubscribes our channel — the
+    /// exists. `Drop` on UpdateEvents unsubscribes our channel — the
     /// `rx.recv()` inside `next()` then returns Err and the await
     /// resolves, letting JS see a clean end.
-    shared: Arc<SharedWalWatcher>,
+    shared: Arc<SharedUpdateWatcher>,
     sub_id: u64,
     rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
-impl Drop for WalEvents {
+impl Drop for UpdateEvents {
     fn drop(&mut self) {
         self.shared.unsubscribe(self.sub_id);
     }
 }
 
 #[napi]
-impl WalEvents {
-    /// Await the next WAL change. Resolves on every DB commit.
+impl UpdateEvents {
+    /// Await the next database update. Resolves on every DB commit.
     #[napi]
     pub async fn next(&self) -> Result<()> {
         let rx = self.rx.clone();
@@ -401,6 +389,7 @@ pub fn open(path: String, max_readers: Option<u32>) -> Result<Database> {
     // via db.transaction().query("SELECT honker_enqueue(...)").
     // Matches the Python binding's open() — parity across languages.
     honker_core::attach_honker_functions(&writer_conn).map_err(napi_err)?;
+    honker_core::bootstrap_honker_schema(&writer_conn).map_err(napi_err)?;
     Ok(Database {
         writer: Arc::new(Writer::new(writer_conn)),
         readers: Arc::new(Readers::new(path.clone(), max_readers)),

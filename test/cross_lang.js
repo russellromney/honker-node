@@ -1,7 +1,7 @@
 // Cross-language e2e: Python ↔ Node share the same .db file.
 //
 // Three scenarios:
-//   1. Python writes → Node reads (walEvents + SELECT)
+//   1. Python writes → Node reads (updateEvents + SELECT)
 //   2. Node writes → Python reads (listen() iterator)
 //   3. Schema compat: Python bootstraps honker tables, Node sees
 //      them via raw SQL (Node binding doesn't expose honker_* functions —
@@ -22,7 +22,7 @@ test('python writes notifications; node reads via WAL wake + SELECT', async () =
   try {
     // Open from Node first so the schema + WAL file exist.
     const db = lit.open(dbPath);
-    const ev = db.walEvents();
+    const ev = db.updateEvents();
 
     // Record last_seen before the writer fires.
     let lastSeen = 0;

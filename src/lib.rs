@@ -111,13 +111,31 @@ fn sql_params_from_json(arr: Option<Vec<JsonValue>>) -> Vec<SqlValue> {
 
 #[napi]
 pub struct Database {
-    writer: Arc<Writer>,
-    readers: Arc<Readers>,
+    writer: Mutex<Option<Arc<Writer>>>,
+    readers: Mutex<Option<Arc<Readers>>>,
     db_path: PathBuf,
     /// Lazy-initialized shared update watcher — one PRAGMA-poll thread per
     /// Database regardless of how many `updateEvents()` subscribers. See
     /// honker-core::SharedUpdateWatcher.
     shared_watcher: Arc<Mutex<Option<Arc<SharedUpdateWatcher>>>>,
+}
+
+impl Database {
+    fn writer(&self) -> Result<Arc<Writer>> {
+        self.writer
+            .lock()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi_err("Database is closed"))
+    }
+
+    fn readers(&self) -> Result<Arc<Readers>> {
+        self.readers
+            .lock()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi_err("Database is closed"))
+    }
 }
 
 #[napi]
@@ -126,23 +144,21 @@ impl Database {
     /// Dropping without either rolls back.
     #[napi]
     pub fn transaction(&self) -> Result<Transaction> {
+        let writer = self.writer()?;
         // Fast path: uncontended slot, no condvar wait. Matches the
         // PyO3 binding's optimization (CHANGELOG: ~5 μs/tx saved).
-        let conn = self
-            .writer
-            .try_acquire()
-            .unwrap_or_else(|| self.writer.acquire());
+        let conn = writer.try_acquire().unwrap_or_else(|| writer.acquire());
         match conn.execute_batch("BEGIN IMMEDIATE") {
             Ok(()) => Ok(Transaction {
                 inner: Arc::new(Mutex::new(TxState {
                     conn: Some(conn),
-                    writer: self.writer.clone(),
+                    writer,
                     started: true,
                     finished: false,
                 })),
             }),
             Err(e) => {
-                self.writer.release(conn);
+                writer.release(conn);
                 Err(napi_err(e))
             }
         }
@@ -152,9 +168,10 @@ impl Database {
     #[napi(ts_return_type = "Array<Record<string, any>>")]
     pub fn query(&self, sql: String, params: Option<Vec<JsonValue>>) -> Result<JsonValue> {
         let params = sql_params_from_json(params);
-        let conn = self.readers.acquire().map_err(napi_err)?;
+        let readers = self.readers()?;
+        let conn = readers.acquire().map_err(napi_err)?;
         let result = run_query(&conn, &sql, &params);
-        self.readers.release(conn);
+        readers.release(conn);
         result
     }
 
@@ -165,6 +182,7 @@ impl Database {
     /// core SharedUpdateWatcher.
     #[napi]
     pub fn update_events(&self) -> Result<UpdateEvents> {
+        self.writer()?;
         let shared = {
             let mut guard = self.shared_watcher.lock();
             if let Some(existing) = guard.as_ref() {
@@ -208,7 +226,8 @@ impl Database {
             "DELETE FROM _honker_notifications WHERE {}",
             conditions.join(" OR ")
         );
-        let conn = self.writer.acquire();
+        let writer = self.writer()?;
+        let conn = writer.acquire();
         let result = (|| -> rusqlite::Result<u32> {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let mut stmt = conn.prepare_cached(&sql)?;
@@ -223,8 +242,17 @@ impl Database {
                 Err(napi_err(e))
             }
         };
-        self.writer.release(conn);
+        writer.release(conn);
         final_result
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        if let Some(shared) = self.shared_watcher.lock().take() {
+            let _ = shared.close();
+        }
+        self.readers.lock().take();
+        self.writer.lock().take();
     }
 }
 
@@ -391,8 +419,8 @@ pub fn open(path: String, max_readers: Option<u32>) -> Result<Database> {
     honker_core::attach_honker_functions(&writer_conn).map_err(napi_err)?;
     honker_core::bootstrap_honker_schema(&writer_conn).map_err(napi_err)?;
     Ok(Database {
-        writer: Arc::new(Writer::new(writer_conn)),
-        readers: Arc::new(Readers::new(path.clone(), max_readers)),
+        writer: Mutex::new(Some(Arc::new(Writer::new(writer_conn)))),
+        readers: Mutex::new(Some(Arc::new(Readers::new(path.clone(), max_readers)))),
         db_path: path.into(),
         shared_watcher: Arc::new(Mutex::new(None)),
     })

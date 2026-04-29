@@ -15,13 +15,40 @@ const os = require('node:os');
 const path = require('node:path');
 
 const lit = require('..');
+const REPO = path.resolve(__dirname, '..', '..', '..');
+const PACKAGES = path.resolve(__dirname, '..', '..');
+const VENV_PY = process.env.HONKER_PYTHON || path.join(
+  REPO,
+  '.venv',
+  process.platform === 'win32' ? 'Scripts' : 'bin',
+  process.platform === 'win32' ? 'python.exe' : 'python',
+);
+
+function cleanupDir(dir) {
+  global.gc?.();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  let lastErr;
+  for (let i = 0; i < 20; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code)) throw err;
+      lastErr = err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (i + 1));
+      global.gc?.();
+    }
+  }
+  throw lastErr;
+}
 
 test('python writes notifications; node reads via WAL wake + SELECT', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-'));
   const dbPath = path.join(dir, 't.db');
+  let db;
   try {
     // Open from Node first so the schema + WAL file exist.
-    const db = lit.open(dbPath);
+    db = lit.open(dbPath);
     const ev = db.updateEvents();
 
     // Record last_seen before the writer fires.
@@ -34,8 +61,6 @@ test('python writes notifications; node reads via WAL wake + SELECT', async () =
     // Python writer: emits 3 notifications on channel 'orders'.
     // __dirname = packages/honker-node/test
     // ../../..  = repo root;  ../..  = packages/
-    const REPO = path.resolve(__dirname, '..', '..', '..');
-    const PACKAGES = path.resolve(__dirname, '..', '..');
     const pyScript = `
 import sys, time
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -47,9 +72,10 @@ with db.transaction() as tx:
     tx.notify("orders", {"id": 2})
 with db.transaction() as tx:
     tx.notify("orders", {"id": 3})
+db.close()
 `;
     const proc = spawn(
-      path.join(REPO, '.venv/bin/python'),
+      VENV_PY,
       ['-c', pyScript],
       { stdio: ['ignore', 'inherit', 'inherit'] },
     );
@@ -86,7 +112,8 @@ with db.transaction() as tx:
       [1, 2, 3],
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    db?.close();
+    cleanupDir(dir);
   }
 });
 
@@ -98,12 +125,11 @@ with db.transaction() as tx:
 test('node writes notifications; python reads via listen()', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-rev-'));
   const dbPath = path.join(dir, 't.db');
+  let db;
   try {
     // Open from Node first to create schema + WAL file.
-    const db = lit.open(dbPath);
+    db = lit.open(dbPath);
 
-    const REPO = path.resolve(__dirname, '..', '..', '..');
-    const PACKAGES = path.resolve(__dirname, '..', '..');
     const pyScript = `
 import asyncio, json, sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -118,6 +144,8 @@ async def main():
         async for n in lst:
             got.append(n.payload)
             if len(got) == 3:
+                await lst.aclose()
+                db.close()
                 return
     await asyncio.wait_for(consume(), timeout=5.0)
     print("RESULT", json.dumps(got), flush=True)
@@ -125,7 +153,7 @@ async def main():
 asyncio.run(main())
 `;
     const proc = spawn(
-      path.join(REPO, '.venv/bin/python'),
+      VENV_PY,
       ['-c', pyScript],
       { stdio: ['ignore', 'pipe', 'inherit'] },
     );
@@ -208,7 +236,8 @@ asyncio.run(main())
       ['a', 'b', 'c'],
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    db?.close();
+    cleanupDir(dir);
   }
 });
 
@@ -222,9 +251,8 @@ test(
   async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-schema-'));
     const dbPath = path.join(dir, 't.db');
+    let db;
     try {
-      const REPO = path.resolve(__dirname, '..', '..', '..');
-      const PACKAGES = path.resolve(__dirname, '..', '..');
       const pyScript = `
 import sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -233,11 +261,12 @@ db = honker.open(${JSON.stringify(dbPath)})
 q = db.queue("shared")
 q.enqueue({"from": "python", "i": 1})
 q.enqueue({"from": "python", "i": 2})
+db.close()
 print("DONE", flush=True)
 `;
       await new Promise((resolve, reject) => {
         const proc = spawn(
-          path.join(REPO, '.venv/bin/python'),
+          VENV_PY,
           ['-c', pyScript],
           { stdio: ['ignore', 'inherit', 'inherit'] },
         );
@@ -250,7 +279,7 @@ print("DONE", flush=True)
 
       // Now open from Node. Schema already exists; Node should
       // see both enqueued jobs via raw SELECT on the shared table.
-      const db = lit.open(dbPath);
+      db = lit.open(dbPath);
       const rows = db.query(
         "SELECT id, queue, payload FROM _honker_live " +
           "WHERE queue='shared' ORDER BY id",
@@ -288,7 +317,8 @@ print("DONE", flush=True)
         );
       }
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      db?.close();
+      cleanupDir(dir);
     }
   },
 );

@@ -28,7 +28,7 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test test/basic.js test/cross_lang.js"
+    "test": "node --expose-gc --test test/basic.js test/cross_lang.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"

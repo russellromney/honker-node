@@ -35,6 +35,7 @@ class Database {
     this._native = inner;
   }
 
+  close() { this._native.close(); }
   transaction() { return new Transaction(this._native.transaction()); }
   query(sql, params) { return this._native.query(sql, params || null); }
   updateEvents() { return this._native.updateEvents(); }

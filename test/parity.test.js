@@ -12,12 +12,31 @@ const os = require('node:os');
 const path = require('node:path');
 
 const honker = require('..');
+const openDbs = new Set();
+const realOpen = honker.open.bind(honker);
+honker.open = (...args) => {
+  const db = realOpen(...args);
+  openDbs.add(db);
+  return db;
+};
+
+function cleanupDir(dir) {
+  for (const db of openDbs) {
+    try {
+      db.close();
+    } finally {
+      openDbs.delete(db);
+    }
+  }
+  global.gc?.();
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 function tmpdb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-parity-'));
   return {
     path: path.join(dir, 't.db'),
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => cleanupDir(dir),
   };
 }
 

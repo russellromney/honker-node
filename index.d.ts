@@ -8,6 +8,7 @@ export interface StreamEvent { offset: number; topic: string; key: string | null
 export interface Notification { id: number; channel: string; payload: JsonValue; }
 
 export declare class Database {
+  close(): void;
   transaction(): Transaction;
   query(sql: string, params?: JsonValue[]): Record<string, any>[];
   updateEvents(): UpdateEvents;

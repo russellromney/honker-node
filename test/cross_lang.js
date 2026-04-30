@@ -48,11 +48,14 @@ with db.transaction() as tx:
 with db.transaction() as tx:
     tx.notify("orders", {"id": 3})
 `;
-    const proc = spawn(
-      path.join(REPO, '.venv/bin/python'),
-      ['-c', pyScript],
-      { stdio: ['ignore', 'inherit', 'inherit'] },
+    const python = path.join(
+      REPO,
+      '.venv',
+      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
     );
+    const proc = spawn(python, ['-c', pyScript], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
 
     const received = [];
     const collectUntil = async (n, timeoutMs) => {
@@ -124,11 +127,14 @@ async def main():
 
 asyncio.run(main())
 `;
-    const proc = spawn(
-      path.join(REPO, '.venv/bin/python'),
-      ['-c', pyScript],
-      { stdio: ['ignore', 'pipe', 'inherit'] },
+    const python = path.join(
+      REPO,
+      '.venv',
+      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
     );
+    const proc = spawn(python, ['-c', pyScript], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
 
     // Line-buffered reader — keeps a single listener on stdout
     // across both READY and RESULT waits, so we don't detach/
@@ -236,11 +242,14 @@ q.enqueue({"from": "python", "i": 2})
 print("DONE", flush=True)
 `;
       await new Promise((resolve, reject) => {
-        const proc = spawn(
-          path.join(REPO, '.venv/bin/python'),
-          ['-c', pyScript],
-          { stdio: ['ignore', 'inherit', 'inherit'] },
+        const python = path.join(
+          REPO,
+          '.venv',
+          process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
         );
+        const proc = spawn(python, ['-c', pyScript], {
+          stdio: ['ignore', 'inherit', 'inherit'],
+        });
         proc.on('exit', (code) =>
           code === 0
             ? resolve()

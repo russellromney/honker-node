@@ -14,7 +14,6 @@ const {
 
 test(
   'direct proof: node writes notifications; python listen() observes them',
-  { skip: process.platform === 'win32' ? 'Windows listener parity not directly proved yet' : false },
   async () => {
     const { path: dbPath, open, cleanup } = createTempDb(
       'xlang-node-to-py-',

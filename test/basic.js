@@ -1,21 +1,25 @@
 // Smoke test for the Node binding. Run with `node --test test/`.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
 const lit = require('..');
+const { createTempDb } = require('./helpers');
 
+// `createTempDb` wraps every Database/UpdateEvents/etc. it hands out
+// so `cleanup()` can close them before unlinking the tempdir. Required
+// on Windows: SQLite holds the file handle, and `rmSync` hits EBUSY
+// until every Connection has been dropped. The wrapper makes the
+// "always close before unlink" rule structural rather than something
+// each test has to remember.
 function tmpdb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-node-'));
-  return { path: path.join(dir, 't.db'), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  return createTempDb('honker-node-', lit.open.bind(lit));
 }
 
 test('open / transaction / commit', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     const tx = db.transaction();
     tx.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)');
     tx.execute('INSERT INTO t (payload) VALUES (?)', ['hello']);
@@ -24,14 +28,16 @@ test('open / transaction / commit', () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].payload, 'hello');
   } finally {
+    db?.close();
     cleanup();
   }
 });
 
 test('rollback drops writes', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     {
       const tx = db.transaction();
       tx.execute('CREATE TABLE t (v INTEGER)');
@@ -45,14 +51,16 @@ test('rollback drops writes', () => {
     const rows = db.query('SELECT COUNT(*) AS c FROM t');
     assert.equal(rows[0].c, 0);
   } finally {
+    db?.close();
     cleanup();
   }
 });
 
 test('notify inserts into _honker_notifications and rollback drops it', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
 
     // Committed notify. payload is any JSON-serializable value —
     // stringified inside the binding, matches Python's json.dumps.
@@ -75,14 +83,16 @@ test('notify inserts into _honker_notifications and rollback drops it', () => {
     assert.equal(rows[0].channel, 'orders');
     assert.deepEqual(JSON.parse(rows[0].payload), { id: 42 });
   } finally {
+    db?.close();
     cleanup();
   }
 });
 
 test('notify payload round-trips common JSON shapes', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     const cases = [
       { id: 42, name: 'alice' },  // object
       [1, 2, 3],                   // array
@@ -103,14 +113,16 @@ test('notify payload round-trips common JSON shapes', () => {
     const decoded = rows.map((r) => JSON.parse(r.payload));
     assert.deepEqual(decoded, cases);
   } finally {
+    db?.close();
     cleanup();
   }
 });
 
 test('updateEvents fires on commit', async () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     // Force WAL file to exist by doing a first commit.
     {
       const tx = db.transaction();
@@ -130,6 +142,7 @@ test('updateEvents fires on commit', async () => {
     assert.ok(dt < 500, `WAL wake took ${dt.toFixed(1)}ms, expected < 500`);
     ev.close();
   } finally {
+    db?.close();
     cleanup();
   }
 });
@@ -139,9 +152,10 @@ test('updateEvents dropped without close() still releases the watcher thread', a
   // any of them. Dropping must cascade to the core UpdateWatcher's Drop,
   // which signals stop to the update watcher thread. Without Drop semantics,
   // 100 abandoned UpdateEvents = 100 stuck threads.
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     // Force the WAL to exist.
     {
       const tx = db.transaction();
@@ -173,14 +187,16 @@ test('updateEvents dropped without close() still releases the watcher thread', a
     assert.ok(dt < 1000, `post-churn WAL wake took ${dt.toFixed(1)}ms`);
     ev.close();
   } finally {
+    db?.close();
     cleanup();
   }
 });
 
 test('pruneNotifications by max_keep', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
   try {
-    const db = lit.open(dbPath);
+    db = open(dbPath);
     for (let i = 0; i < 50; i++) {
       const tx = db.transaction();
       tx.notify('ch', `n${i}`);
@@ -193,6 +209,7 @@ test('pruneNotifications by max_keep', () => {
     const after = db.query('SELECT COUNT(*) AS c FROM _honker_notifications');
     assert.equal(after[0].c, 5);
   } finally {
+    db?.close();
     cleanup();
   }
 });

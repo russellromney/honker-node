@@ -7,37 +7,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
 const honker = require('..');
-const openDbs = new Set();
-const realOpen = honker.open.bind(honker);
-honker.open = (...args) => {
-  const db = realOpen(...args);
-  openDbs.add(db);
-  return db;
-};
-
-function cleanupDir(dir) {
-  for (const db of openDbs) {
-    try {
-      db.close();
-    } finally {
-      openDbs.delete(db);
-    }
-  }
-  global.gc?.();
-  fs.rmSync(dir, { recursive: true, force: true });
-}
+const { createTempDb } = require('./helpers');
 
 function tmpdb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-parity-'));
-  return {
-    path: path.join(dir, 't.db'),
-    cleanup: () => cleanupDir(dir),
-  };
+  return createTempDb('honker-parity-', honker.open.bind(honker));
 }
 
 // ---------------------------------------------------------------------
@@ -45,9 +20,9 @@ function tmpdb() {
 // ---------------------------------------------------------------------
 
 test('queue: enqueue + claimOne + ack', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('emails');
     const id = q.enqueue({ to: 'alice@example.com' });
     assert.ok(id > 0);
@@ -65,9 +40,9 @@ test('queue: enqueue + claimOne + ack', () => {
 });
 
 test('queue: claimBatch with multiple jobs', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('batch');
     for (let i = 0; i < 5; i++) q.enqueue({ i });
     const jobs = q.claimBatch('w1', 3);
@@ -83,9 +58,9 @@ test('queue: claimBatch with multiple jobs', () => {
 });
 
 test('queue: retry + fail semantics', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('retries', { maxAttempts: 2 });
     q.enqueue({ x: 1 });
     const j1 = q.claimOne('w1');
@@ -106,9 +81,9 @@ test('queue: retry + fail semantics', () => {
 });
 
 test('queue: heartbeat extends visibility', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('hb', { visibilityTimeoutS: 1 });
     q.enqueue({});
     const j = q.claimOne('w1');
@@ -120,9 +95,9 @@ test('queue: heartbeat extends visibility', () => {
 });
 
 test('queue: enqueueTx atomic with business write (commit)', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('atomic');
     {
       const tx = db.transaction();
@@ -143,9 +118,9 @@ test('queue: enqueueTx atomic with business write (commit)', () => {
 });
 
 test('queue: enqueueTx with rollback drops both writes', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('rollback');
     {
       const tx = db.transaction();
@@ -166,9 +141,9 @@ test('queue: enqueueTx with rollback drops both writes', () => {
 });
 
 test('queue: enqueue with opts.tx routes through transaction', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('tx-opt');
     const tx = db.transaction();
     q.enqueue({ v: 1 }, { tx });
@@ -183,9 +158,9 @@ test('queue: enqueue with opts.tx routes through transaction', () => {
 });
 
 test('queue: sweepExpired returns a count', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('sweep');
     q.enqueue({});
     const n = q.sweepExpired();
@@ -200,9 +175,9 @@ test('queue: sweepExpired returns a count', () => {
 // ---------------------------------------------------------------------
 
 test('stream: publish + readSince', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('events');
     const o1 = s.publish({ e: 1 });
     const o2 = s.publish({ e: 2 });
@@ -218,9 +193,9 @@ test('stream: publish + readSince', () => {
 });
 
 test('stream: publishWithKey', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('events');
     s.publishWithKey('alice', { msg: 'hi' });
     const evs = s.readSince(0, 10);
@@ -231,9 +206,9 @@ test('stream: publishWithKey', () => {
 });
 
 test('stream: consumer offsets + readFromConsumer', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('events');
     for (let i = 0; i < 5; i++) s.publish({ i });
     assert.equal(s.getOffset('c1'), 0);
@@ -248,9 +223,9 @@ test('stream: consumer offsets + readFromConsumer', () => {
 });
 
 test('stream: saveOffsetTx respects rollback', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('events');
     s.publish({ i: 1 });
     s.publish({ i: 2 });
@@ -264,9 +239,9 @@ test('stream: saveOffsetTx respects rollback', () => {
 });
 
 test('stream: publishTx honors transaction atomicity', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('tx-events');
     const tx = db.transaction();
     s.publishTx(tx, { v: 1 });
@@ -282,9 +257,9 @@ test('stream: publishTx honors transaction atomicity', () => {
 // ---------------------------------------------------------------------
 
 test('listen: fires asynchronously; filters by channel', async () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const sub = db.listen('orders');
     // Emit a notification on the event loop — simulates another
     // "thread" writing. Node is single-threaded; the setTimeout is
@@ -312,9 +287,9 @@ test('listen: fires asynchronously; filters by channel', async () => {
 });
 
 test('database.notify commits outside an open transaction', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const id = db.notify('ch', { hello: 'world' });
     assert.ok(id > 0);
     const rows = db.query(
@@ -332,9 +307,9 @@ test('database.notify commits outside an open transaction', () => {
 // ---------------------------------------------------------------------
 
 test('scheduler: add / soonest / tick', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const sched = db.scheduler();
     sched.add({
       name: 'every-minute',
@@ -353,9 +328,9 @@ test('scheduler: add / soonest / tick', () => {
 });
 
 test('scheduler: remove returns deletion count', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const sched = db.scheduler();
     sched.add({
       name: 'doomed',
@@ -371,9 +346,9 @@ test('scheduler: remove returns deletion count', () => {
 });
 
 test('scheduler: run + AbortSignal stops the loop', async () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const sched = db.scheduler();
     sched.add({
       name: 'spin',
@@ -400,9 +375,9 @@ test('scheduler: run + AbortSignal stops the loop', async () => {
 // ---------------------------------------------------------------------
 
 test('lock: mutual exclusion between owners', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const l = db.tryLock('resource', 'a', 60);
     assert.ok(l);
     const collider = db.tryLock('resource', 'b', 60);
@@ -417,9 +392,9 @@ test('lock: mutual exclusion between owners', () => {
 });
 
 test('lock: heartbeat keeps ownership', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const l = db.tryLock('beat', 'a', 60);
     assert.ok(l);
     assert.equal(l.heartbeat(120), true);
@@ -430,9 +405,9 @@ test('lock: heartbeat keeps ownership', () => {
 });
 
 test('lock: release is idempotent', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const l = db.tryLock('idem', 'a', 60);
     assert.ok(l);
     assert.equal(l.release(), true);
@@ -447,9 +422,9 @@ test('lock: release is idempotent', () => {
 // ---------------------------------------------------------------------
 
 test('rate limit: allows up to limit then blocks', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     for (let i = 0; i < 3; i++) {
       assert.equal(db.tryRateLimit('rl', 3, 60), true);
     }
@@ -464,9 +439,9 @@ test('rate limit: allows up to limit then blocks', () => {
 // ---------------------------------------------------------------------
 
 test('results: save / get / missing returns null', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     db.saveResult(1, JSON.stringify({ status: 'ok' }), 60);
     const v = db.getResult(1);
     assert.deepEqual(JSON.parse(v), { status: 'ok' });
@@ -483,9 +458,9 @@ test('results: save / get / missing returns null', () => {
 // ---------------------------------------------------------------------
 
 test('claimWaker: wakes on enqueue from setImmediate', async () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('waker');
     const waker = q.claimWaker();
     setImmediate(() => {
@@ -508,9 +483,9 @@ test('claimWaker: wakes on enqueue from setImmediate', async () => {
 });
 
 test('claimWaker: returns immediately when a job is already pending', async () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const q = db.queue('prewarm');
     q.enqueue({ x: 1 });
     const waker = q.claimWaker();
@@ -529,9 +504,9 @@ test('claimWaker: returns immediately when a job is already pending', async () =
 // ---------------------------------------------------------------------
 
 test('stream subscribe: async iterates and saves offset on close', async () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const s = db.stream('sub');
     s.publish({ n: 1 });
     s.publish({ n: 2 });
@@ -565,9 +540,9 @@ test('stream subscribe: async iterates and saves offset on close', async () => {
 // ---------------------------------------------------------------------
 
 test('transaction: commit then rollback is a no-op', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const tx = db.transaction();
     tx.execute('CREATE TABLE t (v INTEGER)');
     tx.commit();
@@ -580,9 +555,9 @@ test('transaction: commit then rollback is a no-op', () => {
 });
 
 test('notifyTx convenience matches tx.notify', () => {
-  const { path: p, cleanup } = tmpdb();
+  const { path: p, open, cleanup } = tmpdb();
   try {
-    const db = honker.open(p);
+    const db = open(p);
     const tx = db.transaction();
     const id = db.notifyTx(tx, 'ch', { hi: true });
     assert.ok(id > 0);

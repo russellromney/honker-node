@@ -10,11 +10,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const lit = require('..');
+const { cleanupDir, createTempDb } = require('./helpers');
 const REPO = path.resolve(__dirname, '..', '..', '..');
 const PACKAGES = path.resolve(__dirname, '..', '..');
 const VENV_PY = process.env.HONKER_PYTHON || path.join(
@@ -24,31 +23,15 @@ const VENV_PY = process.env.HONKER_PYTHON || path.join(
   process.platform === 'win32' ? 'python.exe' : 'python',
 );
 
-function cleanupDir(dir) {
-  global.gc?.();
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-  let lastErr;
-  for (let i = 0; i < 20; i++) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (err) {
-      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code)) throw err;
-      lastErr = err;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (i + 1));
-      global.gc?.();
-    }
-  }
-  throw lastErr;
-}
-
 test('python writes notifications; node reads via WAL wake + SELECT', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-'));
-  const dbPath = path.join(dir, 't.db');
+  const { dir, path: dbPath, open, cleanup } = createTempDb(
+    'xlang-',
+    lit.open.bind(lit),
+  );
   let db;
   try {
     // Open from Node first so the schema + WAL file exist.
-    db = lit.open(dbPath);
+    db = open(dbPath);
     const ev = db.updateEvents();
 
     // Record last_seen before the writer fires.
@@ -113,7 +96,7 @@ db.close()
     );
   } finally {
     db?.close();
-    cleanupDir(dir);
+    cleanup();
   }
 });
 
@@ -123,12 +106,14 @@ db.close()
 // events would be skipped. So Python signals READY on stdout
 // before Node commits.
 test('node writes notifications; python reads via listen()', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-rev-'));
-  const dbPath = path.join(dir, 't.db');
+  const { dir, path: dbPath, open, cleanup } = createTempDb(
+    'xlang-rev-',
+    lit.open.bind(lit),
+  );
   let db;
   try {
     // Open from Node first to create schema + WAL file.
-    db = lit.open(dbPath);
+    db = open(dbPath);
 
     const pyScript = `
 import asyncio, json, sys
@@ -237,7 +222,7 @@ asyncio.run(main())
     );
   } finally {
     db?.close();
-    cleanupDir(dir);
+    cleanup();
   }
 });
 
@@ -249,8 +234,10 @@ asyncio.run(main())
 test(
   'python bootstraps honker schema; node reads tables via raw SQL',
   async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-schema-'));
-    const dbPath = path.join(dir, 't.db');
+    const { dir, path: dbPath, open, cleanup } = createTempDb(
+      'xlang-schema-',
+      lit.open.bind(lit),
+    );
     let db;
     try {
       const pyScript = `
@@ -279,7 +266,7 @@ print("DONE", flush=True)
 
       // Now open from Node. Schema already exists; Node should
       // see both enqueued jobs via raw SELECT on the shared table.
-      db = lit.open(dbPath);
+      db = open(dbPath);
       const rows = db.query(
         "SELECT id, queue, payload FROM _honker_live " +
           "WHERE queue='shared' ORDER BY id",
@@ -318,7 +305,7 @@ print("DONE", flush=True)
       }
     } finally {
       db?.close();
-      cleanupDir(dir);
+      cleanup();
     }
   },
 );

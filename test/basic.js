@@ -1,51 +1,19 @@
 // Smoke test for the Node binding. Run with `node --test test/`.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
 const lit = require('..');
-
-function sleep(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function cleanupDir(dir) {
-  global.gc?.();
-  sleep(100);
-  let lastErr;
-  for (let i = 0; i < 40; i++) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (err) {
-      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code)) throw err;
-      lastErr = err;
-      global.gc?.();
-      sleep(50 * (i + 1));
-    }
-  }
-  if (
-    process.platform === 'win32' &&
-    ['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(lastErr?.code)
-  ) {
-    console.warn(`leaving busy tempdir behind: ${dir}`);
-    return;
-  }
-  throw lastErr;
-}
+const { createTempDb } = require('./helpers');
 
 function tmpdb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-node-'));
-  return { path: path.join(dir, 't.db'), dir, cleanup: () => cleanupDir(dir) };
+  return createTempDb('honker-node-', lit.open.bind(lit));
 }
 
 test('open / transaction / commit', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     const tx = db.transaction();
     tx.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)');
     tx.execute('INSERT INTO t (payload) VALUES (?)', ['hello']);
@@ -55,17 +23,15 @@ test('open / transaction / commit', () => {
     assert.equal(rows[0].payload, 'hello');
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
 
 test('rollback drops writes', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     {
       const tx = db.transaction();
       tx.execute('CREATE TABLE t (v INTEGER)');
@@ -80,17 +46,15 @@ test('rollback drops writes', () => {
     assert.equal(rows[0].c, 0);
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
 
 test('notify inserts into _honker_notifications and rollback drops it', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
 
     // Committed notify. payload is any JSON-serializable value —
     // stringified inside the binding, matches Python's json.dumps.
@@ -114,17 +78,15 @@ test('notify inserts into _honker_notifications and rollback drops it', () => {
     assert.deepEqual(JSON.parse(rows[0].payload), { id: 42 });
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
 
 test('notify payload round-trips common JSON shapes', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     const cases = [
       { id: 42, name: 'alice' },  // object
       [1, 2, 3],                   // array
@@ -146,17 +108,15 @@ test('notify payload round-trips common JSON shapes', () => {
     assert.deepEqual(decoded, cases);
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
 
 test('updateEvents fires on commit', async () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     // Force WAL file to exist by doing a first commit.
     {
       const tx = db.transaction();
@@ -177,8 +137,6 @@ test('updateEvents fires on commit', async () => {
     ev.close();
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
@@ -188,10 +146,10 @@ test('updateEvents dropped without close() still releases the watcher thread', a
   // any of them. Dropping must cascade to the core UpdateWatcher's Drop,
   // which signals stop to the update watcher thread. Without Drop semantics,
   // 100 abandoned UpdateEvents = 100 stuck threads.
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     // Force the WAL to exist.
     {
       const tx = db.transaction();
@@ -224,17 +182,15 @@ test('updateEvents dropped without close() still releases the watcher thread', a
     ev.close();
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
     cleanup();
   }
 });
 
 test('pruneNotifications by max_keep', () => {
-  const { path: dbPath, cleanup } = tmpdb();
+  const { path: dbPath, open, cleanup } = tmpdb();
   let db;
   try {
-    db = lit.open(dbPath);
+    db = open(dbPath);
     for (let i = 0; i < 50; i++) {
       const tx = db.transaction();
       tx.notify('ch', `n${i}`);
@@ -248,8 +204,30 @@ test('pruneNotifications by max_keep', () => {
     assert.equal(after[0].c, 5);
   } finally {
     db?.close();
-    db = null;
-    global.gc?.();
+    cleanup();
+  }
+});
+
+test('explicit close releases listener and watcher resources for cleanup', async () => {
+  const { path: dbPath, open, cleanup } = tmpdb();
+  let db;
+  let listener;
+  let ev;
+  let sub;
+  let waker;
+  try {
+    db = open(dbPath);
+    listener = db.listen('release');
+    ev = db.updateEvents();
+    sub = db.stream('release-stream').subscribe('consumer');
+    waker = db.queue('release-jobs').claimWaker();
+
+    listener.close();
+    ev.close();
+    sub.close();
+    waker.close();
+    db.close();
+  } finally {
     cleanup();
   }
 });

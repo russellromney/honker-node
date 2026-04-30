@@ -35,12 +35,21 @@ class Database {
     this._native = inner;
   }
 
-  close() { this._native.close(); }
-  transaction() { return new Transaction(this._native.transaction()); }
-  query(sql, params) { return this._native.query(sql, params || null); }
-  updateEvents() { return this._native.updateEvents(); }
+  _requireOpen() {
+    if (!this._native) throw new Error('Database is closed');
+    return this._native;
+  }
+
+  close() {
+    const nativeDb = this._native;
+    this._native = null;
+    nativeDb?.close();
+  }
+  transaction() { return new Transaction(this._requireOpen().transaction()); }
+  query(sql, params) { return this._requireOpen().query(sql, params || null); }
+  updateEvents() { return this._requireOpen().updateEvents(); }
   pruneNotifications(olderThanS, maxKeep) {
-    return this._native.pruneNotifications(olderThanS ?? null, maxKeep ?? null);
+    return this._requireOpen().pruneNotifications(olderThanS ?? null, maxKeep ?? null);
   }
 
   _call(sql, params) {
@@ -329,6 +338,29 @@ class Lock {
 
 function open(path, maxReaders) {
   return new Database(native.open(path, maxReaders ?? null));
+}
+
+if (Symbol.dispose) {
+  Database.prototype[Symbol.dispose] = Database.prototype.close;
+  ClaimWaker.prototype[Symbol.dispose] = ClaimWaker.prototype.close;
+  StreamSubscription.prototype[Symbol.dispose] = StreamSubscription.prototype.close;
+  ListenIterator.prototype[Symbol.dispose] = ListenIterator.prototype.close;
+}
+
+if (Symbol.asyncDispose) {
+  Database.prototype[Symbol.asyncDispose] = async function asyncDisposeDb() {
+    this.close();
+  };
+  ClaimWaker.prototype[Symbol.asyncDispose] = async function asyncDisposeWaker() {
+    this.close();
+  };
+  StreamSubscription.prototype[Symbol.asyncDispose] =
+    async function asyncDisposeSubscription() {
+      this.close();
+    };
+  ListenIterator.prototype[Symbol.asyncDispose] = async function asyncDisposeListener() {
+    this.close();
+  };
 }
 
 module.exports = {

@@ -26,8 +26,8 @@
     "node": ">= 18"
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --js native.js",
+    "build:debug": "napi build --platform --js native.js",
     "test": "node --expose-gc --test test/basic.js test/cross_lang.js"
   },
   "devDependencies": {

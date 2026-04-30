@@ -21,6 +21,7 @@ test(
     );
     let db;
     let proc;
+    let dvInterval;
     try {
       db = open(dbPath);
 
@@ -96,14 +97,39 @@ asyncio.run(main())
       const nextLineMatching = createLineReader(proc.stdout);
 
       await nextLineMatching((line) => line === 'READY', 25000);
+      const diag = (msg) => process.stderr.write(`[node-diag] ${msg}\n`);
+      const dvNow = () => {
+        try {
+          return db.query('PRAGMA data_version')[0].data_version;
+        } catch (err) {
+          return `err:${err.message}`;
+        }
+      };
+      const cntNow = () => {
+        try {
+          return db.query(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM _honker_notifications WHERE channel='reverse'",
+          )[0];
+        } catch (err) {
+          return { err: err.message };
+        }
+      };
+      diag(`READY received. before-tx data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
 
       const tx = db.transaction();
       tx.notify('reverse', { tag: 'a', i: 1 });
       tx.notify('reverse', { tag: 'b', i: 2 });
       tx.commit();
+      diag(`tx1 committed. data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
       const tx2 = db.transaction();
       tx2.notify('reverse', { tag: 'c', i: 3 });
       tx2.commit();
+      diag(`tx2 committed. data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
+
+      dvInterval = setInterval(() => {
+        diag(`heartbeat data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
+      }, 1000);
+      dvInterval.unref?.();
 
       const resultLine = await nextLineMatching(
         (line) => line.startsWith('RESULT '),
@@ -121,6 +147,7 @@ asyncio.run(main())
         ['a', 'b', 'c'],
       );
     } finally {
+      try { clearInterval(dvInterval); } catch (_) {}
       db?.close();
       await stopChild(proc);
       cleanup();

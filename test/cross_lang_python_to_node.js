@@ -94,7 +94,7 @@ import honker
 time.sleep(0.2)
 db = honker.open(${JSON.stringify(dbPath)})
 with db.transaction() as tx:
-    tx.notify("cleanup", {"ok": true})
+    tx.notify("cleanup", {"ok": True})
 `;
       proc = spawnPython(pyScript, ['ignore', 'inherit', 'inherit']);
       await Promise.race([

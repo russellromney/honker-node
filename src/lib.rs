@@ -131,7 +131,8 @@ impl Database {
         let conn = self
             .writer
             .try_acquire()
-            .unwrap_or_else(|| self.writer.acquire());
+            .or_else(|| self.writer.acquire())
+            .ok_or_else(|| napi_err("Database is closed"))?;
         match conn.execute_batch("BEGIN IMMEDIATE") {
             Ok(()) => Ok(Transaction {
                 inner: Arc::new(Mutex::new(TxState {
@@ -208,7 +209,10 @@ impl Database {
             "DELETE FROM _honker_notifications WHERE {}",
             conditions.join(" OR ")
         );
-        let conn = self.writer.acquire();
+        let conn = self
+            .writer
+            .acquire()
+            .ok_or_else(|| napi_err("Database is closed"))?;
         let result = (|| -> rusqlite::Result<u32> {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let mut stmt = conn.prepare_cached(&sql)?;
@@ -225,6 +229,38 @@ impl Database {
         };
         self.writer.release(conn);
         final_result
+    }
+
+    /// Release the underlying SQLite handles and the watcher poll
+    /// thread so the OS can unlink the database file. After `close()`,
+    /// any further `transaction()` / `query()` / `updateEvents()` /
+    /// `pruneNotifications()` calls return an error.
+    ///
+    /// Idempotent. Safe to call from `finally`/`afterEach` blocks even
+    /// if the test never used the database.
+    ///
+    /// Why this matters on Windows: SQLite holds the `.db` file open
+    /// for the lifetime of every Connection. On Linux/macOS, `unlink`
+    /// on a still-open file works (the inode survives until the last
+    /// fd closes). On Windows, it does not — `EBUSY` until every
+    /// handle is dropped. Without explicit close, the writer/reader
+    /// connections live until the JavaScript GC drops every
+    /// Transaction/UpdateEvents object that ever cloned the
+    /// `Arc<Writer>` / `Arc<Readers>`, which a test-cleanup block
+    /// can't force.
+    #[napi]
+    pub fn close(&self) {
+        // Drop the watcher's read-only connection (joins the poll
+        // thread synchronously). Doing this first guarantees no
+        // background reader is racing the writer/reader closes below.
+        if let Some(shared) = self.shared_watcher.lock().take() {
+            let _ = shared.close();
+        }
+        // These reach inside the Arc<Writer> / Arc<Readers> and drop
+        // the underlying Connection regardless of how many Arc clones
+        // exist (Transactions still alive in JS, etc.).
+        self.writer.close();
+        self.readers.close();
     }
 }
 

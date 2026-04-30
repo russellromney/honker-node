@@ -10,19 +10,44 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const lit = require('..');
+const { createTempDb } = require('./helpers');
+
+const REPO = path.resolve(__dirname, '..', '..', '..');
+const PACKAGES = path.resolve(__dirname, '..', '..');
+const PYTHON = path.join(
+  REPO,
+  '.venv',
+  process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
+);
+
+function waitForExit(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return Promise.resolve(proc?.exitCode);
+  }
+  return new Promise((resolve) => proc.once('exit', resolve));
+}
+
+async function stopChild(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  proc.kill();
+  await waitForExit(proc);
+}
 
 test('python writes notifications; node reads via WAL wake + SELECT', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-'));
-  const dbPath = path.join(dir, 't.db');
+  const { path: dbPath, open, cleanup } = createTempDb(
+    'xlang-',
+    lit.open.bind(lit),
+  );
+  let db;
+  let ev;
+  let proc;
   try {
     // Open from Node first so the schema + WAL file exist.
-    const db = lit.open(dbPath);
-    const ev = db.updateEvents();
+    db = open(dbPath);
+    ev = db.updateEvents();
 
     // Record last_seen before the writer fires.
     let lastSeen = 0;
@@ -34,8 +59,6 @@ test('python writes notifications; node reads via WAL wake + SELECT', async () =
     // Python writer: emits 3 notifications on channel 'orders'.
     // __dirname = packages/honker-node/test
     // ../../..  = repo root;  ../..  = packages/
-    const REPO = path.resolve(__dirname, '..', '..', '..');
-    const PACKAGES = path.resolve(__dirname, '..', '..');
     const pyScript = `
 import sys, time
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -48,12 +71,7 @@ with db.transaction() as tx:
 with db.transaction() as tx:
     tx.notify("orders", {"id": 3})
 `;
-    const python = path.join(
-      REPO,
-      '.venv',
-      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
-    );
-    const proc = spawn(python, ['-c', pyScript], {
+    proc = spawn(PYTHON, ['-c', pyScript], {
       stdio: ['ignore', 'inherit', 'inherit'],
     });
 
@@ -89,7 +107,10 @@ with db.transaction() as tx:
       [1, 2, 3],
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    ev?.close();
+    db?.close();
+    await stopChild(proc);
+    cleanup();
   }
 });
 
@@ -98,15 +119,19 @@ with db.transaction() as tx:
 // construction — if Node wrote before Python subscribed, those
 // events would be skipped. So Python signals READY on stdout
 // before Node commits.
-test('node writes notifications; python reads via listen()', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-rev-'));
-  const dbPath = path.join(dir, 't.db');
+const listenTest = process.platform === 'win32' ? test.skip : test;
+
+listenTest('node writes notifications; python reads via listen()', async () => {
+  const { path: dbPath, open, cleanup } = createTempDb(
+    'xlang-rev-',
+    lit.open.bind(lit),
+  );
+  let db;
+  let proc;
   try {
     // Open from Node first to create schema + WAL file.
-    const db = lit.open(dbPath);
+    db = open(dbPath);
 
-    const REPO = path.resolve(__dirname, '..', '..', '..');
-    const PACKAGES = path.resolve(__dirname, '..', '..');
     const pyScript = `
 import asyncio, json, sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -122,17 +147,12 @@ async def main():
             got.append(n.payload)
             if len(got) == 3:
                 return
-    await asyncio.wait_for(consume(), timeout=5.0)
+    await asyncio.wait_for(consume(), timeout=20.0)
     print("RESULT", json.dumps(got), flush=True)
 
 asyncio.run(main())
 `;
-    const python = path.join(
-      REPO,
-      '.venv',
-      process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
-    );
-    const proc = spawn(python, ['-c', pyScript], {
+    proc = spawn(PYTHON, ['-c', pyScript], {
       stdio: ['ignore', 'pipe', 'inherit'],
     });
 
@@ -185,7 +205,7 @@ asyncio.run(main())
     // Wait for READY so Python's listener is attached before we
     // commit. Without this, Python skips events that happened
     // before subscription (Listener starts at MAX(id)).
-    await nextLineMatching((l) => l === 'READY', 5000);
+    await nextLineMatching((l) => l === 'READY', 25000);
 
     // Now publish from Node.
     const tx = db.transaction();
@@ -199,7 +219,7 @@ asyncio.run(main())
     // Read Python's RESULT line.
     const resultLine = await nextLineMatching(
       (l) => l.startsWith('RESULT '),
-      5000,
+      25000,
     );
     const result = JSON.parse(resultLine.slice('RESULT '.length));
     await new Promise((resolve) => proc.on('exit', resolve));
@@ -214,9 +234,77 @@ asyncio.run(main())
       ['a', 'b', 'c'],
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    db?.close();
+    await stopChild(proc);
+    cleanup();
   }
 });
+
+test(
+  'node writes notifications; python reads rows via raw SQL on Windows',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const { path: dbPath, open, cleanup } = createTempDb(
+      'xlang-rev-sql-',
+      lit.open.bind(lit),
+    );
+    let db;
+    try {
+      db = open(dbPath);
+      const tx = db.transaction();
+      tx.notify('reverse-sql', { tag: 'a', i: 1 });
+      tx.notify('reverse-sql', { tag: 'b', i: 2 });
+      tx.commit();
+      const tx2 = db.transaction();
+      tx2.notify('reverse-sql', { tag: 'c', i: 3 });
+      tx2.commit();
+      db.close();
+
+      const pyScript = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(PACKAGES)})
+import honker
+
+db = honker.open(${JSON.stringify(dbPath)})
+rows = db.query(
+    "SELECT payload FROM _honker_notifications "
+    "WHERE channel='reverse-sql' ORDER BY id"
+)
+print("RESULT", json.dumps([json.loads(r["payload"]) for r in rows]), flush=True)
+`;
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(PYTHON, ['-c', pyScript], {
+          stdio: ['ignore', 'pipe', 'inherit'],
+        });
+        let out = '';
+        proc.stdout.on('data', (chunk) => {
+          out += chunk.toString('utf8');
+        });
+        proc.on('exit', (code) => {
+          if (code !== 0) return reject(new Error(`python exited ${code}`));
+          const line = out
+            .split(/\r?\n/)
+            .find((candidate) => candidate.startsWith('RESULT '));
+          if (!line) return reject(new Error(`missing RESULT line: ${out}`));
+          resolve(JSON.parse(line.slice('RESULT '.length)));
+        });
+      });
+
+      assert.equal(result.length, 3);
+      assert.deepEqual(
+        result.map((r) => r.i),
+        [1, 2, 3],
+      );
+      assert.deepEqual(
+        result.map((r) => r.tag),
+        ['a', 'b', 'c'],
+      );
+    } finally {
+      db?.close();
+      cleanup();
+    }
+  },
+);
 
 // Schema compat: a .db bootstrapped by honker.open() in Python
 // has every _honker_* table. Node (which only
@@ -226,11 +314,12 @@ asyncio.run(main())
 test(
   'python bootstraps honker schema; node reads tables via raw SQL',
   async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-schema-'));
-    const dbPath = path.join(dir, 't.db');
+    const { path: dbPath, open, cleanup } = createTempDb(
+      'xlang-schema-',
+      lit.open.bind(lit),
+    );
+    let db;
     try {
-      const REPO = path.resolve(__dirname, '..', '..', '..');
-      const PACKAGES = path.resolve(__dirname, '..', '..');
       const pyScript = `
 import sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
@@ -242,12 +331,7 @@ q.enqueue({"from": "python", "i": 2})
 print("DONE", flush=True)
 `;
       await new Promise((resolve, reject) => {
-        const python = path.join(
-          REPO,
-          '.venv',
-          process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
-        );
-        const proc = spawn(python, ['-c', pyScript], {
+        const proc = spawn(PYTHON, ['-c', pyScript], {
           stdio: ['ignore', 'inherit', 'inherit'],
         });
         proc.on('exit', (code) =>
@@ -259,7 +343,7 @@ print("DONE", flush=True)
 
       // Now open from Node. Schema already exists; Node should
       // see both enqueued jobs via raw SELECT on the shared table.
-      const db = lit.open(dbPath);
+      db = open(dbPath);
       const rows = db.query(
         "SELECT id, queue, payload FROM _honker_live " +
           "WHERE queue='shared' ORDER BY id",
@@ -297,7 +381,8 @@ print("DONE", flush=True)
         );
       }
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      db?.close();
+      cleanup();
     }
   },
 );

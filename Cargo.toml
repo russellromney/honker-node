@@ -24,6 +24,9 @@ rusqlite = { version = "0.39.0", features = ["functions", "hooks"] }
 serde_json = "1.0"
 tokio = { version = "1.52.1", features = ["rt", "rt-multi-thread"] }
 
+[target.'cfg(windows)'.dependencies]
+honker-core = { path = "../../honker-core", version = "0.2.1", features = ["bundled-sqlite"] }
+
 [build-dependencies]
 napi-build = "2.2"
 

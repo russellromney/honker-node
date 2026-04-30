@@ -37,8 +37,13 @@ function createLineReader(stream) {
     buf += chunk.toString('utf8');
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl);
+      let line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
+      // Python's print() on Windows runs through text-mode stdout
+      // and writes "\r\n" terminators. Strip the trailing CR before
+      // delivering the line so consumers can use strict equality
+      // (e.g. `line === 'READY'`) and stay portable.
+      if (line.endsWith('\r')) line = line.slice(0, -1);
       lines.push(line);
       const waiter = waiters.shift();
       if (waiter) waiter(line);

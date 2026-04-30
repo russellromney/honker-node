@@ -158,6 +158,12 @@ while (running) {
 }
 ```
 
+Current cross-language direct proof is asymmetric: Python -> Node wake
+through Node `updateEvents()` runs in CI on Linux, macOS, and Windows.
+Node -> Python listener wake is directly proved on Linux and macOS.
+On Windows, the repo currently keeps shared-row interop and close/cleanup
+proof, but not reverse listener parity proof yet.
+
 ### SQLite extension (any SQLite 3.9+ client)
 
 ```sql

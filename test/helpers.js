@@ -31,6 +31,12 @@ function trackCloseable(tracked, resource) {
   return resource;
 }
 
+function wrapMethod(target, name, wrapResult) {
+  if (!target || typeof target[name] !== 'function') return;
+  const real = target[name].bind(target);
+  target[name] = (...args) => wrapResult(real(...args));
+}
+
 function wrapDatabase(db, tracked) {
   if (db.__honkerTracked) return db;
 
@@ -43,30 +49,16 @@ function wrapDatabase(db, tracked) {
 
   trackCloseable(tracked, db);
 
-  const realUpdateEvents = db.updateEvents.bind(db);
-  db.updateEvents = (...args) => trackCloseable(tracked, realUpdateEvents(...args));
-
-  const realListen = db.listen.bind(db);
-  db.listen = (...args) => trackCloseable(tracked, realListen(...args));
-
-  const realStream = db.stream.bind(db);
-  db.stream = (...args) => {
-    const stream = realStream(...args);
-    const realSubscribe = stream.subscribe.bind(stream);
-    stream.subscribe = (...subArgs) => trackCloseable(tracked, realSubscribe(...subArgs));
+  wrapMethod(db, 'updateEvents', (resource) => trackCloseable(tracked, resource));
+  wrapMethod(db, 'listen', (resource) => trackCloseable(tracked, resource));
+  wrapMethod(db, 'stream', (stream) => {
+    wrapMethod(stream, 'subscribe', (resource) => trackCloseable(tracked, resource));
     return stream;
-  };
-
-  const realQueue = db.queue.bind(db);
-  db.queue = (...args) => {
-    const queue = realQueue(...args);
-    if (typeof queue.claimWaker === 'function') {
-      const realClaimWaker = queue.claimWaker.bind(queue);
-      queue.claimWaker = (...wakeArgs) =>
-        trackCloseable(tracked, realClaimWaker(...wakeArgs));
-    }
+  });
+  wrapMethod(db, 'queue', (queue) => {
+    wrapMethod(queue, 'claimWaker', (resource) => trackCloseable(tracked, resource));
     return queue;
-  };
+  });
 
   return db;
 }

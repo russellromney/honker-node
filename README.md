@@ -78,14 +78,14 @@ with db.transaction() as tx:
     emails.enqueue({"to": "alice@example.com"}, tx=tx)   # atomic with order
 
 # Then in a worker, do: 
-async for job in emails.claim("worker-1"):               # wakes on any WAL commit
+async for job in emails.claim("worker-1"):               # wakes on any database update
     try:
         send(job.payload); job.ack()
     except Exception as e:
         job.retry(delay_s=60, error=str(e))
 ```
 
-`claim()` is an async iterator. Each iteration is one `claim_batch(worker_id, 1)`. Wakes on any WAL commit, falls back to a 5 s paranoia poll only if the WAL watcher can't fire. For batched work, call `claim_batch(worker_id, n)` explicitly and ack with `queue.ack_batch(ids, worker_id)`. Defaults: visibility 300 s.
+`claim()` is an async iterator. Each iteration is one `claim_batch(worker_id, 1)`. Wakes on any database update, falls back to a 5 s paranoia poll only if the update watcher can't fire. For batched work, call `claim_batch(worker_id, n)` explicitly and ack with `queue.ack_batch(ids, worker_id)`. Defaults: visibility 300 s.
 
 ### Python: tasks (Huey-style decorators)
 
@@ -148,7 +148,7 @@ tx.execute('INSERT INTO orders (id) VALUES (?)', [42]);
 tx.notify('orders', { id: 42 });
 tx.commit();
 
-const ev = db.walEvents();
+const ev = db.updateEvents();
 let last = 0;
 while (running) {
   await ev.next();
@@ -199,41 +199,34 @@ For Postgres-backed apps, [`pg_notify`](https://www.postgresql.org/docs/current/
 
 The extension has three primitives that tie it together: ephemeral pub/sub (`notify()`), durable pub/sub with per-consumer offsets (`stream()`), at-least-once work queue (`queue()`). All three are INSERTs inside your transaction, which lets a task "send" be atomic with your business write, and rollback drops everything.
 
-The explicit goal is to do `NOTIFY`/`LISTEN` semantics without constant polling, to achieve single-digit ms reaction time. If you use your app's existing SQLite file containing business logic, it will notify workers on every WAL commit. This means that most triggers will not result in anything happening: instead, workers just read the message/queue with no result. This "overtriggering" is on purpose and is the tradeoff for push semantics and fast reaction time.
+The explicit goal is to do `NOTIFY`/`LISTEN` semantics without constant polling, to achieve single-digit ms reaction time. If you use your app's existing SQLite file containing business logic, it will notify workers on every commit. This means that most triggers will not result in anything happening: instead, workers just read the message/queue with no result. This "overtriggering" is on purpose and is the tradeoff for push semantics and fast reaction time.
 
-### WAL-only by design
+### WAL is the recommended default
 
-honker requires `journal_mode = WAL` on every database it manages. `honker_bootstrap()` refuses to run on a file-backed DB that isn't in WAL mode, and the language bindings set `PRAGMA journal_mode = WAL` in their default open path.
-
-- Workers hold open read views (WAL subscription channels, listener iterators) for their whole lifetime. In DELETE / TRUNCATE modes, writers take an EXCLUSIVE lock; every active reader blocks until release. A single worker actively claiming would serialize every `enqueue()` / `notify()` in the system behind it. WAL lets readers and writers coexist.
-- The `.db-wal` sidecar grows on every commit and only shrinks at checkpoint. Stat-polling it gives a monotonic, unambiguous change signal. The rollback-journal sidecar (`.db-journal`) in DELETE mode appears mid-transaction and vanishes on commit, making it a poor stat-poll target.
-- With `wal_autocheckpoint = 10000`, WAL performs one fsync per 10k pages instead of per-commit. Most of the throughput win comes from that.
-
-If you need a SQLite database that never enters WAL mode (e.g. for a backup target, or to avoid the `.db-wal` / `.db-shm` sidecars in a shared filesystem), honker is not the right tool. Use plain SQLite and live without the NOTIFY/LISTEN semantics.
+The language bindings default to `journal_mode = WAL` because it gives concurrent readers with one writer and efficient fsync batching (`wal_autocheckpoint = 10000`). Other modes (DELETE, TRUNCATE, MEMORY) still work. The wake path is `PRAGMA data_version`, which increments on every commit in every journal mode and is visible across processes. What you lose in non-WAL modes is WAL's concurrent-read-while-writing property; correctness and cross-process wake do not depend on WAL.
 
 The library/extension is a small coordination layer built on the properties of SQLite and single-server architecture.
 
-- One `.db` + one `.db-wal` is the entire system. You get every benefit of SQLite (embedded, local, durable, snapshot-able) that your app already uses.
-- WAL mode gives one writer and concurrent readers. Claim is one `UPDATE … RETURNING` via a partial index, ack is one `DELETE`.
-- The WAL file grows on every commit, so `(size, mtime)` is the cross-process commit signal.
-- SQLite has no wire protocol. Consumers must initiate reads; server-push is impossible. Wake signal = file change → `SELECT`.
+- One `.db` is the entire system (plus `.db-wal` / `.db-shm` sidecars if you've opted into WAL). You get every benefit of SQLite (embedded, local, durable, snapshot-able) that your app already uses.
+- Claim is one `UPDATE … RETURNING` via a partial index; ack is one `DELETE`. One writer at a time no matter the journal mode; concurrent readers come with WAL.
+- We poll `PRAGMA data_version` every 1 ms to detect commits from any connection in any journal mode. The counter increments on every commit and on checkpoint, so WAL truncation, journal-file comings-and-goings, and exact-size collisions are all handled correctly.
+- SQLite has no wire protocol. Consumers must initiate reads; server-push is impossible. Wake signal = counter increment → `SELECT`.
 - Transactions are cheap, so jobs, events, and notifications are rows in the caller's open `with db.transaction()` block in an "outbox"-type pattern.
-- We use `stat(2)` cross-platform instead of the technically better `FSEvents`/`inotify`/`kqueue`. FSEvents drops same-process writes on macOS, meaning a listener and enqueuer in the same Python process would never see each other. `stat(2)` works identically on Linux/macOS/Windows at ~1 ms granularity for negligible CPU. Cost: ~0.5 ms of latency vs kernel notifications.
 - Single machine, single writer. SQLite's locking is designed for a single host. Two servers writing one `.db` over NFS will corrupt it. Shard by file, or switch to Postgres.
 
 ## Architecture
 
 ### Wake path
 
-- One `stat(2)` thread per `Database`, polls `.db-wal` every 1 ms
-- `(size, mtime)` change → fan out a tick to each subscriber's bounded channel
+- One PRAGMA-poll thread per `Database`, queries `data_version` every 1 ms
+- Counter change → fan out a tick to each subscriber's bounded channel
 - Each subscriber runs `SELECT … WHERE id > last_seen` against a partial index, yields rows, returns to wait
-- 100 subscribers = 1 stat thread
+- 100 subscribers = 1 poll thread
 - Idle listeners run zero SQL queries
 
-Idle cost is a single `stat(2)` per millisecond per database. Listener count scales for free because the wake signal is a file stat instead of a polling query.
+Idle cost is a single `PRAGMA data_version` query per millisecond per database. Listener count scales for free because the wake signal is a SQLite counter read instead of a polling query.
 
-`SharedWalWatcher` (in `honker-core`) owns the poll thread and fans out to N subscribers via bounded `SyncSender<()>` channels keyed by subscriber id. Each `db.wal_events()` call registers a subscriber and returns a handle whose `Drop` auto-unsubscribes, so a dropped listener causes the bridge thread's `rx.recv() -> Err` and exits cleanly.
+`SharedUpdateWatcher` (in `honker-core`) owns the poll thread and fans out to N subscribers via bounded `SyncSender<()>` channels keyed by subscriber id. Each `db.update_events()` call registers a subscriber and returns a handle whose `Drop` auto-unsubscribes, so a dropped listener causes the bridge thread's `rx.recv() -> Err` and exits cleanly.
 
 ### Queue schema
 
@@ -249,7 +242,7 @@ Partial-index on state means the claim hot path is bounded by the *working-set* 
 
 - `async for job in q.claim(id)` yields one job at a time via `claim_batch(id, 1)`
 - `Job.ack()` is one `DELETE` in its own transaction. Return is an honest bool: `True` iff the claim was still valid, `False` if the visibility window elapsed and another worker reclaimed.
-- Wakes on WAL commit from any process; a 5 s paranoia poll is the only fallback.
+- Wakes on database update from any process; a 5 s paranoia poll is the only fallback.
 
 For batched work, call `claim_batch(worker_id, n)` directly and ack with `queue.ack_batch(ids, worker_id)`. The library doesn't hide batching behind the iterator. The per-tx cost and the at-most-once visibility semantics are easier to reason about when the API doesn't try to be clever.
 
@@ -264,7 +257,7 @@ This is the transactional outbox pattern, by default, without a library to insta
 
 ### Over-triggering quickly is better than over-triggering from polling
 
-- A WAL change wakes *every* subscriber on that `Database`, not just the ones whose channel committed
+- A database update wakes *every* subscriber on that `Database`, not just the ones whose channel committed
 - Each wasted wake = one indexed SELECT (microseconds)
 - A missed wake = a silent correctness bug
 
@@ -312,7 +305,7 @@ SSE endpoints are ~30 lines of `async def stream(...): yield f"data: ...\n\n"` o
 
 ## Performance
 
-Handles thousands of messages per second on a modern laptop, with cross-process wake latency bounded by the 1 ms stat-poll cadence (~1–2 ms median on M-series). Run `bench/wake_latency_bench.py` and `bench/real_bench.py` to measure on your hardware.
+Handles thousands of messages per second on a modern laptop, with cross-process wake latency bounded by the 1 ms update-watcher cadence (~1–2 ms median on M-series). Run `bench/wake_latency_bench.py` and `bench/real_bench.py` to measure on your hardware.
 
 ## Development
 

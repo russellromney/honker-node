@@ -107,7 +107,7 @@ test('notify payload round-trips common JSON shapes', () => {
   }
 });
 
-test('walEvents fires on commit', async () => {
+test('updateEvents fires on commit', async () => {
   const { path: dbPath, cleanup } = tmpdb();
   try {
     const db = lit.open(dbPath);
@@ -117,8 +117,8 @@ test('walEvents fires on commit', async () => {
       tx.execute('CREATE TABLE t (n INTEGER)');
       tx.commit();
     }
-    const ev = db.walEvents();
-    // Fire a commit after a short delay; walEvents.next() should resolve.
+    const ev = db.updateEvents();
+    // Fire a commit after a short delay; updateEvents.next() should resolve.
     setTimeout(() => {
       const tx = db.transaction();
       tx.execute('INSERT INTO t (n) VALUES (1)');
@@ -134,11 +134,11 @@ test('walEvents fires on commit', async () => {
   }
 });
 
-test('walEvents dropped without close() still releases the watcher thread', async () => {
-  // Create+drop many WalEvents instances without calling .close() on
-  // any of them. Dropping must cascade to the core WalWatcher's Drop,
-  // which signals stop to the stat-poll thread. Without Drop semantics,
-  // 100 abandoned WalEvents = 100 stuck threads.
+test('updateEvents dropped without close() still releases the watcher thread', async () => {
+  // Create+drop many UpdateEvents instances without calling .close() on
+  // any of them. Dropping must cascade to the core UpdateWatcher's Drop,
+  // which signals stop to the update watcher thread. Without Drop semantics,
+  // 100 abandoned UpdateEvents = 100 stuck threads.
   const { path: dbPath, cleanup } = tmpdb();
   try {
     const db = lit.open(dbPath);
@@ -150,7 +150,7 @@ test('walEvents dropped without close() still releases the watcher thread', asyn
     }
 
     for (let i = 0; i < 100; i++) {
-      const ev = db.walEvents();
+      const ev = db.updateEvents();
       // Let the thread spawn; don't call close(). Abandon and move on.
       void ev;
     }
@@ -159,9 +159,9 @@ test('walEvents dropped without close() still releases the watcher thread', asyn
     if (global.gc) global.gc();
     await new Promise((r) => setTimeout(r, 100));
 
-    // Sanity: a fresh walEvents still wakes on commit. If prior watchers
+    // Sanity: a fresh updateEvents still wakes on commit. If prior watchers
     // somehow deadlocked the poll infrastructure this would time out.
-    const ev = db.walEvents();
+    const ev = db.updateEvents();
     setTimeout(() => {
       const tx = db.transaction();
       tx.execute('INSERT INTO t (n) VALUES (1)');

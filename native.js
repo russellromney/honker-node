@@ -578,5 +578,5 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.Database = nativeBinding.Database
 module.exports.Transaction = nativeBinding.Transaction
-module.exports.WalEvents = nativeBinding.WalEvents
+module.exports.UpdateEvents = nativeBinding.UpdateEvents
 module.exports.open = nativeBinding.open

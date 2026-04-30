@@ -7,20 +7,31 @@ const path = require('node:path');
 
 const lit = require('..');
 
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function cleanupDir(dir) {
   global.gc?.();
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  sleep(100);
   let lastErr;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 40; i++) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
       return;
     } catch (err) {
       if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code)) throw err;
       lastErr = err;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (i + 1));
       global.gc?.();
+      sleep(50 * (i + 1));
     }
+  }
+  if (
+    process.platform === 'win32' &&
+    ['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(lastErr?.code)
+  ) {
+    console.warn(`leaving busy tempdir behind: ${dir}`);
+    return;
   }
   throw lastErr;
 }
@@ -44,6 +55,8 @@ test('open / transaction / commit', () => {
     assert.equal(rows[0].payload, 'hello');
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -67,6 +80,8 @@ test('rollback drops writes', () => {
     assert.equal(rows[0].c, 0);
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -99,6 +114,8 @@ test('notify inserts into _honker_notifications and rollback drops it', () => {
     assert.deepEqual(JSON.parse(rows[0].payload), { id: 42 });
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -129,6 +146,8 @@ test('notify payload round-trips common JSON shapes', () => {
     assert.deepEqual(decoded, cases);
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -158,6 +177,8 @@ test('updateEvents fires on commit', async () => {
     ev.close();
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -203,6 +224,8 @@ test('updateEvents dropped without close() still releases the watcher thread', a
     ev.close();
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });
@@ -225,6 +248,8 @@ test('pruneNotifications by max_keep', () => {
     assert.equal(after[0].c, 5);
   } finally {
     db?.close();
+    db = null;
+    global.gc?.();
     cleanup();
   }
 });

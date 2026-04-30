@@ -21,75 +21,26 @@ test(
     );
     let db;
     let proc;
-    let dvInterval;
     try {
       db = open(dbPath);
 
       const pyScript = `
-import asyncio, json, sys, time
+import asyncio, json, sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
 import honker
 
-def diag(msg):
-    sys.stderr.write("[py-diag] " + msg + "\\n")
-    sys.stderr.flush()
-
 async def main():
     db = honker.open(${JSON.stringify(dbPath)})
-    diag("opened db, journal_mode=" + repr(db.query("PRAGMA journal_mode")))
     lst = db.listen("reverse")
-    diag("listener created, last_seen=" + repr(lst._last_seen))
     print("READY", flush=True)
     got = []
-
     async def consume():
         async for n in lst:
-            diag("consume got id=" + str(n.id))
             got.append(n.payload)
             if len(got) == 3:
                 return
-
-    async def diagnostics():
-        # Independent reader-pool view. Tells us whether Python's
-        # READER sees Node's writes, separate from whether the
-        # WATCHER fires the wake.
-        t0 = time.monotonic()
-        i = 0
-        while True:
-            await asyncio.sleep(0.5)
-            i += 1
-            try:
-                rows = db.query(
-                    "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m "
-                    "FROM _honker_notifications WHERE channel='reverse'"
-                )
-                jm = db.query("PRAGMA journal_mode")
-                dv = db.query("PRAGMA data_version")
-                diag(
-                    "tick=%d t=%.1fs got=%d count=%d max_id=%s journal_mode=%s data_version=%s"
-                    % (
-                        i,
-                        time.monotonic() - t0,
-                        len(got),
-                        rows[0]["n"],
-                        rows[0]["m"],
-                        jm[0]["journal_mode"] if jm else "?",
-                        dv[0]["data_version"] if dv else "?",
-                    )
-                )
-            except Exception as exc:
-                diag("diag query error: " + repr(exc))
-
-    diag_task = asyncio.create_task(diagnostics())
-    try:
-        await asyncio.wait_for(consume(), timeout=20.0)
-        print("RESULT", json.dumps(got), flush=True)
-    finally:
-        diag_task.cancel()
-        try:
-            await diag_task
-        except (asyncio.CancelledError, Exception):
-            pass
+    await asyncio.wait_for(consume(), timeout=20.0)
+    print("RESULT", json.dumps(got), flush=True)
 
 asyncio.run(main())
 `;
@@ -97,39 +48,14 @@ asyncio.run(main())
       const nextLineMatching = createLineReader(proc.stdout);
 
       await nextLineMatching((line) => line === 'READY', 25000);
-      const diag = (msg) => process.stderr.write(`[node-diag] ${msg}\n`);
-      const dvNow = () => {
-        try {
-          return db.query('PRAGMA data_version')[0].data_version;
-        } catch (err) {
-          return `err:${err.message}`;
-        }
-      };
-      const cntNow = () => {
-        try {
-          return db.query(
-            "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM _honker_notifications WHERE channel='reverse'",
-          )[0];
-        } catch (err) {
-          return { err: err.message };
-        }
-      };
-      diag(`READY received. before-tx data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
 
       const tx = db.transaction();
       tx.notify('reverse', { tag: 'a', i: 1 });
       tx.notify('reverse', { tag: 'b', i: 2 });
       tx.commit();
-      diag(`tx1 committed. data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
       const tx2 = db.transaction();
       tx2.notify('reverse', { tag: 'c', i: 3 });
       tx2.commit();
-      diag(`tx2 committed. data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
-
-      dvInterval = setInterval(() => {
-        diag(`heartbeat data_version=${dvNow()} cnt=${JSON.stringify(cntNow())}`);
-      }, 1000);
-      dvInterval.unref?.();
 
       const resultLine = await nextLineMatching(
         (line) => line.startsWith('RESULT '),
@@ -147,7 +73,6 @@ asyncio.run(main())
         ['a', 'b', 'c'],
       );
     } finally {
-      try { clearInterval(dvInterval); } catch (_) {}
       db?.close();
       await stopChild(proc);
       cleanup();

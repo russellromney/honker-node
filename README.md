@@ -158,12 +158,9 @@ while (running) {
 }
 ```
 
-Current cross-language direct proof is intended to run on every platform:
+Current cross-language direct proof runs on every platform:
 Python -> Node wake through Node `updateEvents()`, and Node -> Python
-listener wake through Python `listen()`. Today, Windows reverse listener
-parity is still a real gap. The CI suite keeps the supporting shared-row
-interop and close/cleanup proofs, but the direct reverse-listener proof
-is allowed to fail until parity is fixed.
+listener wake through Python `listen()`.
 
 ### SQLite extension (any SQLite 3.9+ client)
 

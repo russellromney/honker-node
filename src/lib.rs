@@ -42,56 +42,33 @@ fn napi_err(e: impl std::fmt::Display) -> napi::Error {
 }
 
 /// Parse the optional `watcherBackend` JS string into a [`WatcherConfig`].
-///
-/// Accepted values mirror the Python binding:
-/// - `null` / `"polling"` / `"poll"` → default 1 ms PRAGMA polling.
-/// - `"kernel"` / `"kernel-watcher"` → kernel filesystem notifications.
-///   Requires the `kernel-watcher` Cargo feature; falls back to polling
-///   with a warning if the feature isn't compiled in.
-/// - `"shm"` / `"shm-fast-path"` → mmap `-shm` fast path. Requires the
-///   `shm-fast-path` Cargo feature; falls back with a warning otherwise.
-/// - Any other string → JS `Error`.
+/// Defers to [`honker_core::WatcherBackend::parse`] so accepted aliases
+/// stay in sync with the Python binding. Surfaces a one-line stderr
+/// warning when a requested backend isn't compiled in.
 fn parse_watcher_backend(backend: Option<String>) -> Result<WatcherConfig> {
-    use honker_core::WatcherBackend;
-    let b = match backend.as_deref() {
-        None | Some("polling") | Some("poll") => WatcherBackend::Polling,
-        Some("kernel") | Some("kernel-watcher") => {
-            #[cfg(feature = "kernel-watcher")]
-            {
-                WatcherBackend::KernelWatch
-            }
-            #[cfg(not(feature = "kernel-watcher"))]
-            {
-                eprintln!(
-                    "honker: this build was not compiled with the \
-                     `kernel-watcher` feature; falling back to polling"
-                );
-                WatcherBackend::Polling
-            }
+    use honker_core::{WatcherBackend, WatcherBackendNote};
+    match WatcherBackend::parse(backend.as_deref()) {
+        Ok((b, WatcherBackendNote::Ok)) => Ok(WatcherConfig { backend: b }),
+        Ok((b, WatcherBackendNote::KernelWatchUnavailable)) => {
+            eprintln!(
+                "honker: this build was not compiled with the \
+                 `kernel-watcher` feature; falling back to polling"
+            );
+            Ok(WatcherConfig { backend: b })
         }
-        Some("shm") | Some("shm-fast-path") => {
-            #[cfg(feature = "shm-fast-path")]
-            {
-                WatcherBackend::ShmFastPath
-            }
-            #[cfg(not(feature = "shm-fast-path"))]
-            {
-                eprintln!(
-                    "honker: this build was not compiled with the \
-                     `shm-fast-path` feature; falling back to polling"
-                );
-                WatcherBackend::Polling
-            }
+        Ok((b, WatcherBackendNote::ShmFastPathUnavailable)) => {
+            eprintln!(
+                "honker: this build was not compiled with the \
+                 `shm-fast-path` feature; falling back to polling"
+            );
+            Ok(WatcherConfig { backend: b })
         }
-        Some(other) => {
-            return Err(napi_err(format!(
-                "unknown watcherBackend {:?}; valid values: \
-                 null, 'polling', 'kernel', 'shm'",
-                other
-            )));
-        }
-    };
-    Ok(WatcherConfig { backend: b })
+        Err(other) => Err(napi_err(format!(
+            "unknown watcherBackend {:?}; valid values: \
+             null, 'polling', 'kernel', 'shm'",
+            other
+        ))),
+    }
 }
 
 // ---------- JSON <-> SQL param conversion ----------

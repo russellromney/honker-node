@@ -41,34 +41,14 @@ fn napi_err(e: impl std::fmt::Display) -> napi::Error {
     napi::Error::new(napi::Status::GenericFailure, e.to_string())
 }
 
-/// Parse the optional `watcherBackend` JS string into a [`WatcherConfig`].
-/// Defers to [`honker_core::WatcherBackend::parse`] so accepted aliases
-/// stay in sync with the Python binding. Surfaces a one-line stderr
-/// warning when a requested backend isn't compiled in.
 fn parse_watcher_backend(backend: Option<String>) -> Result<WatcherConfig> {
-    use honker_core::{WatcherBackend, WatcherBackendNote};
-    match WatcherBackend::parse(backend.as_deref()) {
-        Ok((b, WatcherBackendNote::Ok)) => Ok(WatcherConfig { backend: b }),
-        Ok((b, WatcherBackendNote::KernelWatchUnavailable)) => {
-            eprintln!(
-                "honker: this build was not compiled with the \
-                 `kernel-watcher` feature; falling back to polling"
-            );
-            Ok(WatcherConfig { backend: b })
-        }
-        Ok((b, WatcherBackendNote::ShmFastPathUnavailable)) => {
-            eprintln!(
-                "honker: this build was not compiled with the \
-                 `shm-fast-path` feature; falling back to polling"
-            );
-            Ok(WatcherConfig { backend: b })
-        }
-        Err(other) => Err(napi_err(format!(
-            "unknown watcherBackend {:?}; valid values: \
-             null, 'polling', 'kernel', 'shm'",
-            other
-        ))),
-    }
+    honker_core::WatcherBackend::parse(backend.as_deref())
+        .map(|backend| WatcherConfig { backend })
+        .map_err(|other| {
+            napi_err(format!(
+                "unknown watcherBackend {other:?}; valid: null, 'polling', 'kernel', 'shm'"
+            ))
+        })
 }
 
 // ---------- JSON <-> SQL param conversion ----------

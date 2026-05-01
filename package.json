@@ -2,12 +2,14 @@
   "name": "@russellthehippo/honker-node",
   "version": "0.3.1",
   "description": "Node binding for honker — durable queues, streams, pub/sub, and scheduler on SQLite.",
-  "main": "index.js",
+  "main": "wrapper.js",
   "types": "index.d.ts",
   "homepage": "https://honker.dev",
   "publishConfig": { "access": "public" },
   "files": [
     "index.js",
+    "wrapper.js",
+    "api.js",
     "index.d.ts",
     "README.md",
     "LICENSE",
@@ -28,7 +30,7 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test test/basic.js test/cross_lang_python_to_node.js test/cross_lang_node_to_python.js test/cross_lang_supporting.js"
+    "test": "node --test test/basic.js test/parity.test.js test/cross_lang_python_to_node.js test/cross_lang_node_to_python.js test/cross_lang_supporting.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"

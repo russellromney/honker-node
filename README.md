@@ -51,7 +51,7 @@ Today:
 - Single-digit millisecond cross-process reaction time, no polling
 - Handler timeouts, declarative retries with exponential backoff
 - Delayed jobs, task expiration, named locks, rate-limiting
-- Crontab-style periodic tasks with a leader-elected scheduler
+- Time-trigger scheduling with a leader-elected scheduler, including every-second schedules
 - Opt-in task result storage (`enqueue` returns an id, worker persists the
   return value, caller awaits `queue.wait_result(id)`)
 - Durable streams with per-consumer offsets and configurable flush interval
@@ -85,7 +85,7 @@ async for job in emails.claim("worker-1"):               # wakes on any database
         job.retry(delay_s=60, error=str(e))
 ```
 
-`claim()` is an async iterator. Each iteration is one `claim_batch(worker_id, 1)`. Wakes on any database update, falls back to a 5 s paranoia poll only if the update watcher can't fire. For batched work, call `claim_batch(worker_id, n)` explicitly and ack with `queue.ack_batch(ids, worker_id)`. Defaults: visibility 300 s.
+`claim()` is an async iterator. Each iteration is one `claim_batch(worker_id, 1)`. Wakes on any database update, or when the next claim-relevant deadline arrives (`run_at` for delayed jobs, or `claim_expires_at` for reclaims). Falls back to a 5 s paranoia poll only if the update watcher can't fire. For batched work, call `claim_batch(worker_id, n)` explicitly and ack with `queue.ack_batch(ids, worker_id)`. Defaults: visibility 300 s.
 
 ### Python: tasks (Huey-style decorators)
 
@@ -249,7 +249,7 @@ Partial-index on state means the claim hot path is bounded by the *working-set* 
 
 - `async for job in q.claim(id)` yields one job at a time via `claim_batch(id, 1)`
 - `Job.ack()` is one `DELETE` in its own transaction. Return is an honest bool: `True` iff the claim was still valid, `False` if the visibility window elapsed and another worker reclaimed.
-- Wakes on database update from any process; a 5 s paranoia poll is the only fallback.
+- Wakes on database update from any process, or when the next `run_at` / reclaim deadline arrives; a 5 s paranoia poll is the only fallback.
 
 For batched work, call `claim_batch(worker_id, n)` directly and ack with `queue.ack_batch(ids, worker_id)`. The library doesn't hide batching behind the iterator. The per-tx cost and the at-most-once visibility semantics are easier to reason about when the API doesn't try to be clever.
 

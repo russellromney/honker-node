@@ -8,6 +8,15 @@ const honker = require('..');
 const { createTempDb } = require('./helpers');
 const { PACKAGES, spawnPython, stopChild } = require('./cross_lang_shared');
 
+async function waitForGone(dir, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (fs.existsSync(dir)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
 test('direct proof: python writes notifications; node updateEvents() + SELECT observes them', async () => {
   const { path: dbPath, open, cleanup } = createTempDb(
     'xlang-py-to-node-',
@@ -114,9 +123,10 @@ with db.transaction() as tx:
       db.close();
       db = null;
       await new Promise((resolve) => proc.on('exit', resolve));
-      cleanup();
+      const removedNow = cleanup();
       cleaned = true;
-      assert.equal(fs.existsSync(dir), false, `tempdir still exists after cleanup: ${dir}`);
+      const gone = removedNow || (await waitForGone(dir));
+      assert.equal(gone, true, `tempdir still exists after cleanup: ${dir}`);
     } finally {
       if (ev) ev.close();
       if (db) db.close();

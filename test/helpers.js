@@ -103,7 +103,14 @@ function createTempDb(prefix, openFn) {
     open: (...args) => wrapDatabase(openFn(...args), tracked),
     cleanup: () => {
       closeTracked(tracked);
-      deferredCleanupDirs.add(dir);
+      try {
+        cleanupDir(dir);
+        deferredCleanupDirs.delete(dir);
+        return true;
+      } catch {
+        deferredCleanupDirs.add(dir);
+        return false;
+      }
     },
   };
 }

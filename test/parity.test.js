@@ -12,12 +12,50 @@ const os = require('node:os');
 const path = require('node:path');
 
 const honker = require('..');
+const realOpen = honker.open.bind(honker);
+
+const deferredCleanupDirs = new Set();
+let deferredCleanupInstalled = false;
+const trackedDbsByPath = new Map();
+
+function installDeferredCleanup() {
+  if (deferredCleanupInstalled) return;
+  deferredCleanupInstalled = true;
+  process.on('exit', () => {
+    for (const dir of deferredCleanupDirs) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {}
+    }
+    deferredCleanupDirs.clear();
+  });
+}
+
+honker.open = function trackedOpen(dbPath, ...args) {
+  const db = realOpen(dbPath, ...args);
+  const tracked = trackedDbsByPath.get(dbPath);
+  if (tracked) tracked.push(db);
+  return db;
+};
 
 function tmpdb() {
+  installDeferredCleanup();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-parity-'));
+  const dbPath = path.join(dir, 't.db');
+  trackedDbsByPath.set(dbPath, []);
   return {
-    path: path.join(dir, 't.db'),
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    path: dbPath,
+    cleanup: () => {
+      const tracked = trackedDbsByPath.get(dbPath) || [];
+      trackedDbsByPath.delete(dbPath);
+      while (tracked.length) {
+        const db = tracked.pop();
+        try {
+          db.close?.();
+        } catch {}
+      }
+      deferredCleanupDirs.add(dir);
+    },
   };
 }
 
@@ -320,7 +358,7 @@ test('scheduler: add / soonest / tick', () => {
     sched.add({
       name: 'every-minute',
       queue: 'q',
-      cron: '* * * * *',
+      schedule: '* * * * *',
       payload: { hello: 'world' },
     });
     const soonest = sched.soonest();
@@ -341,7 +379,7 @@ test('scheduler: remove returns deletion count', () => {
     sched.add({
       name: 'doomed',
       queue: 'q',
-      cron: '* * * * *',
+      schedule: '* * * * *',
       payload: null,
     });
     assert.equal(sched.remove('doomed'), 1);
@@ -359,7 +397,7 @@ test('scheduler: run + AbortSignal stops the loop', async () => {
     sched.add({
       name: 'spin',
       queue: 'q',
-      cron: '* * * * *',
+      schedule: '* * * * *',
       payload: {},
     });
     const ctrl = new AbortController();
@@ -371,6 +409,44 @@ test('scheduler: run + AbortSignal stops the loop', async () => {
     await runPromise;
     const elapsed = Date.now() - started;
     assert.ok(elapsed < 2500, `expected fast shutdown; took ${elapsed}ms`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('scheduler: accepts legacy cron alias', () => {
+  const { path: p, cleanup } = tmpdb();
+  try {
+    const db = honker.open(p);
+    const sched = db.scheduler();
+    sched.add({
+      name: 'legacy',
+      queue: 'q',
+      cron: '@every 1s',
+      payload: { legacy: true },
+    });
+    assert.ok(sched.soonest() > 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('scheduler: accepts every-second schedule', () => {
+  const { path: p, cleanup } = tmpdb();
+  try {
+    const db = honker.open(p);
+    const sched = db.scheduler();
+    sched.add({
+      name: 'fast',
+      queue: 'q',
+      schedule: '@every 1s',
+      payload: { ok: true },
+    });
+    const soonest = sched.soonest();
+    assert.ok(soonest > 0);
+    const fires = sched.tick(soonest);
+    assert.equal(fires.length, 1);
+    assert.equal(fires[0].name, 'fast');
   } finally {
     cleanup();
   }
@@ -498,6 +574,38 @@ test('claimWaker: returns immediately when a job is already pending', async () =
     const job = await waker.next('w1');
     assert.ok(job);
     assert.deepEqual(job.payload, { x: 1 });
+    job.ack();
+    waker.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test('claimWaker: wakes when runAt deadline arrives', async () => {
+  const { path: p, cleanup } = tmpdb();
+  try {
+    const db = honker.open(p);
+    const q = db.queue('deadline');
+    const runAt = Math.floor(Date.now() / 1000) + 2;
+    const msUntilDue = runAt * 1000 - Date.now();
+    q.enqueue({ hello: 'future' }, { runAt });
+    const waker = q.claimWaker({ idlePollS: 30 });
+    const t0 = Date.now();
+    const job = await Promise.race([
+      waker.next('w1'),
+      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
+    const dt = Date.now() - t0;
+    assert.ok(job, 'claimWaker timed out waiting for runAt job');
+    assert.deepEqual(job.payload, { hello: 'future' });
+    assert.ok(
+      dt >= Math.max(0, msUntilDue - 250),
+      `runAt wake came too early: ${dt}ms (expected about ${msUntilDue}ms)`,
+    );
+    assert.ok(
+      dt <= msUntilDue + 2500,
+      `runAt wake came too late: ${dt}ms (expected about ${msUntilDue}ms)`,
+    );
     job.ack();
     waker.close();
   } finally {

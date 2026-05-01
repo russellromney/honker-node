@@ -457,10 +457,19 @@ pub fn open(
     // Matches the Python binding's open() — parity across languages.
     honker_core::attach_honker_functions(&writer_conn).map_err(napi_err)?;
     honker_core::bootstrap_honker_schema(&writer_conn).map_err(napi_err)?;
+    // Probe the chosen backend now (after the writer connection has
+    // created -wal / -shm in WAL mode). Failures throw from open() so a
+    // backend that can't run never silently produces no wakes.
+    let db_path: PathBuf = path.into();
+    if let Err(reason) = watcher_config.backend.probe(&db_path) {
+        return Err(napi_err(format!(
+            "watcherBackend probe failed: {reason}"
+        )));
+    }
     Ok(Database {
         writer: Arc::new(Writer::new(writer_conn)),
-        readers: Arc::new(Readers::new(path.clone(), max_readers)),
-        db_path: path.into(),
+        readers: Arc::new(Readers::new(db_path.to_string_lossy().into_owned(), max_readers)),
+        db_path,
         shared_watcher: Arc::new(Mutex::new(None)),
         watcher_config,
     })

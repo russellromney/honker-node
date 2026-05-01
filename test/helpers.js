@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const deferredCleanupDirs = new Set();
+let deferredCleanupInstalled = false;
+
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -77,7 +80,21 @@ function closeTracked(tracked) {
   sleepSync(100);
 }
 
+function installDeferredCleanup() {
+  if (deferredCleanupInstalled) return;
+  deferredCleanupInstalled = true;
+  process.on('exit', () => {
+    for (const dir of deferredCleanupDirs) {
+      try {
+        cleanupDir(dir);
+      } catch {}
+    }
+    deferredCleanupDirs.clear();
+  });
+}
+
 function createTempDb(prefix, openFn) {
+  installDeferredCleanup();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const tracked = [];
   return {
@@ -86,7 +103,14 @@ function createTempDb(prefix, openFn) {
     open: (...args) => wrapDatabase(openFn(...args), tracked),
     cleanup: () => {
       closeTracked(tracked);
-      cleanupDir(dir);
+      try {
+        cleanupDir(dir);
+        deferredCleanupDirs.delete(dir);
+        return true;
+      } catch {
+        deferredCleanupDirs.add(dir);
+        return false;
+      }
     },
   };
 }

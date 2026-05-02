@@ -1,59 +1,20 @@
-# @russellthehippo/honker-node
+# honker-node
 
-Node.js binding for [Honker](https://github.com/russellromney/honker): durable queues, streams, pub/sub, and time-trigger scheduling on SQLite.
+This repository is archived.
 
-Full docs live here:
+Honker's maintained bindings now live in the main Honker repo:
+https://github.com/russellromney/honker/tree/main/packages/honker-node
 
-- [Main repo](https://github.com/russellromney/honker)
-- [Docs](https://honker.dev)
+Use that path for source, issues, pull requests, examples, and release work.
 
-## Install
+Main repo:
 
-```bash
-npm install @russellthehippo/honker-node
-```
+https://github.com/russellromney/honker
 
-You also need the Honker SQLite extension. Build it from the main repo or use a release artifact.
+Docs:
 
-## Quick start
+https://honker.dev
 
-```js
-const honker = require("@russellthehippo/honker-node");
+The npm package is still `@russellthehippo/honker-node`; only the source moved.
 
-const db = honker.open("app.db");
-const q = db.queue("emails");
-
-q.enqueue({ to: "alice@example.com" });
-
-for await (const job of q.claim("worker-1")) {
-  sendEmail(job.payload);
-  job.ack();
-}
-```
-
-Delayed jobs use `runAt`:
-
-```js
-q.enqueue({ to: "later@example.com" }, { runAt: Math.floor(Date.now() / 1000) + 10 });
-```
-
-Recurring schedules use `schedule`:
-
-```js
-const sched = db.scheduler();
-sched.add("fast", { queue: "emails", schedule: "@every 1s", payload: { kind: "tick" } });
-```
-
-Supported schedule forms:
-
-- `0 3 * * *`
-- `*/2 * * * * *`
-- `@every 1s`
-
-## Notes
-
-- `claim()` wakes on database updates and on due deadlines.
-- `schedule` is the canonical recurring-schedule option.
-- `cron` still works as a compatibility alias.
-
-For streams, notify/listen, SQL functions, and full scheduler docs, see the main repo and docs site.
+This repo stays online as a signpost for old links.
